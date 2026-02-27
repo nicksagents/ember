@@ -19,6 +19,7 @@ interface SidebarProps {
   onSelect: (id: string) => void;
   onNew: () => void;
   onDelete: (id: string) => void;
+  onDeleteAll: () => void;
   isOpen: boolean;
   onClose: () => void;
 }
@@ -29,6 +30,7 @@ export function Sidebar({
   onSelect,
   onNew,
   onDelete,
+  onDeleteAll,
   isOpen,
   onClose,
 }: SidebarProps) {
@@ -132,13 +134,27 @@ export function Sidebar({
                     e.stopPropagation();
                     onDelete(conv.id);
                   }}
-                  className="shrink-0 rounded p-1 text-zinc-600 transition-opacity hover:text-red-400 md:opacity-0 md:group-hover:opacity-100"
+                  aria-label="Delete conversation"
+                  className="shrink-0 rounded p-1 text-zinc-500 opacity-70 transition-opacity hover:text-red-400 hover:opacity-100"
                 >
                   <Trash2 className="h-3.5 w-3.5" />
                 </button>
               </div>
             ))
           )}
+        </div>
+
+        {/* Footer */}
+        <div className="border-t border-zinc-800 p-3">
+          <Button
+            variant="ghost"
+            className="w-full justify-center gap-2 text-zinc-400 hover:text-red-300"
+            disabled={conversations.length === 0}
+            onClick={onDeleteAll}
+          >
+            <Trash2 className="h-4 w-4" />
+            Delete all conversations
+          </Button>
         </div>
       </div>
     </>

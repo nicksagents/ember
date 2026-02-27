@@ -4,6 +4,8 @@ export interface AgentConfig {
   temperature: number;
   model: string;
   statelessProvider: boolean;
+  unrestrictedShell: boolean;
+  webSearchEnabled: boolean;
   corePrompt: string;
   userMd: string;
   soulMd: string;
@@ -24,6 +26,8 @@ export const DEFAULT_AGENT_CONFIG: AgentConfig = {
   temperature: 0.7,
   model: "",
   statelessProvider: true,
+  unrestrictedShell: false,
+  webSearchEnabled: true,
   corePrompt:
     "You are Ember, a local agent runtime. Be direct, practical, and honest.",
   userMd: "",

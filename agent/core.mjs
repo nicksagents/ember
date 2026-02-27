@@ -1,17 +1,21 @@
-const DEFAULT_MAX_MEMORY_ITEMS = 20;
-const DEFAULT_MAX_MEMORY_CHARS = 4000;
+const DEFAULT_MAX_MEMORY_ITEMS = 10;
+const DEFAULT_MAX_MEMORY_CHARS = 800;
 const DEFAULT_CONTEXT_LIMIT = 40;
 const DEFAULT_MAX_TOOL_ROUNDS = 20;
-const DEFAULT_MEMORY_LIMIT = 2;
-const DEFAULT_MAX_PINNED = 1;
+const DEFAULT_MEMORY_LIMIT = 5;
+const DEFAULT_MAX_PINNED = 2;
 const DEFAULT_MEMORY_MAX_AGE_DAYS = 180;
 const DEFAULT_REFERENCE_MAX_AGE_DAYS = 45;
 const DEFAULT_MIN_SCORE = 1;
-const DEFAULT_EMBEDDING_DIM = 64;
+const DEFAULT_EMBEDDING_DIM = 256;
 const DEFAULT_MAX_MEMORY_BUCKET = 50;
 const DEFAULT_RECENT_MEMORY_BUCKET = 50;
 const DEFAULT_DECAY_HALF_LIFE_DAYS = 120;
 const DEFAULT_USAGE_BOOST_MAX = 1.5;
+const DEFAULT_MAX_TOOL_RESULT_CHARS = 8000;
+const DEFAULT_MAX_LIST_DIR_ENTRIES = 200;
+const DEFAULT_MAX_TOOL_STREAM_CHARS = 4000;
+const TOOL_LOOP_MESSAGE_LIMIT = 20;
 const STOPWORDS = new Set([
   "the",
   "and",
@@ -106,6 +110,12 @@ export function sanitizeConfigInput(input) {
   if (typeof input.statelessProvider === "boolean") {
     safe.statelessProvider = input.statelessProvider;
   }
+  if (typeof input.unrestrictedShell === "boolean") {
+    safe.unrestrictedShell = input.unrestrictedShell;
+  }
+  if (typeof input.webSearchEnabled === "boolean") {
+    safe.webSearchEnabled = input.webSearchEnabled;
+  }
   if (typeof input.temperature === "number") {
     safe.temperature = clampNumber(input.temperature, 0, 2, 0.7);
   }
@@ -167,12 +177,21 @@ export function buildSystemPrompt({
   skillsSummary,
   workspaceSummary,
   memories,
-  memorySuggestions,
   maxMemoryItems = DEFAULT_MAX_MEMORY_ITEMS,
   maxMemoryChars = DEFAULT_MAX_MEMORY_CHARS,
 }) {
   const sections = [];
   if (isNonEmptyString(corePrompt)) sections.push(corePrompt.trim());
+  sections.push(
+    [
+      "[Workflow]",
+      "For tool-backed tasks, always use 3 layers in order:",
+      "1. Understand the task: identify the goal, constraints, target paths/services, and success criteria.",
+      "2. Execute the task: use the minimum necessary tools and keep moving until the task is actually changed.",
+      "3. Verify the result: use tools to confirm the requested end state before the final answer.",
+      "Never claim success from intention, a PID, or an unverified command alone.",
+    ].join("\n")
+  );
   if (isNonEmptyString(workspaceSummary)) {
     sections.push(workspaceSummary.trim());
   }
@@ -195,38 +214,6 @@ export function buildSystemPrompt({
   if (isNonEmptyString(soulMd)) sections.push(`[soul.md]\n${soulMd.trim()}`);
   if (isNonEmptyString(skillsSummary)) sections.push(skillsSummary.trim());
 
-  if (Array.isArray(memorySuggestions) && memorySuggestions.length > 0) {
-    const items = memorySuggestions
-      .map((sugg) => {
-        const content =
-          typeof sugg?.content === "string" ? sugg.content.trim() : "";
-        if (!content) return "";
-        const reason =
-          typeof sugg?.reason === "string" ? sugg.reason.trim() : "";
-        const type =
-          typeof sugg?.type === "string" ? sugg.type.trim() : "";
-        const confidence =
-          typeof sugg?.confidence === "number"
-            ? `, conf ${sugg.confidence.toFixed(2)}`
-            : "";
-        const meta = [type ? `type ${type}` : "", confidence ? `confidence${confidence}` : ""]
-          .filter(Boolean)
-          .join(", ");
-        const suffix = [reason, meta].filter(Boolean).join("; ");
-        return suffix ? `- ${content} (${suffix})` : `- ${content}`;
-      })
-      .filter(Boolean);
-    if (items.length > 0) {
-      sections.push(
-        [
-          "[Memory suggestions]",
-          "If accurate and durable, consider saving with save_memory:",
-          ...items,
-        ].join("\n")
-      );
-    }
-  }
-
   return sections.filter(Boolean).join("\n\n");
 }
 
@@ -242,6 +229,23 @@ function parseLooseToolCalls(content) {
   if (typeof content !== "string") return [];
   const calls = [];
   let index = 0;
+  const seen = new Set();
+  const pushToolCall = (name, args) => {
+    const safeName = String(name || "").trim();
+    if (!safeName) return;
+    const serializedArgs = JSON.stringify(args ?? {});
+    const fingerprint = `${safeName}:${serializedArgs}`;
+    if (seen.has(fingerprint)) return;
+    seen.add(fingerprint);
+    calls.push({
+      id: `tool_${Date.now()}_${index++}`,
+      type: "function",
+      function: {
+        name: safeName,
+        arguments: serializedArgs,
+      },
+    });
+  };
 
   const toolCallRegex = /<tool_call>([\s\S]*?)<\/tool_call>/gi;
   let toolMatch;
@@ -253,14 +257,7 @@ function parseLooseToolCalls(content) {
       const name = parsed?.name || parsed?.function?.name;
       const args = parsed?.arguments ?? parsed?.function?.arguments ?? {};
       if (name) {
-        calls.push({
-          id: `tool_${Date.now()}_${index++}`,
-          type: "function",
-          function: {
-            name: String(name),
-            arguments: JSON.stringify(args ?? {}),
-          },
-        });
+        pushToolCall(String(name), args ?? {});
       }
     } catch {
       // ignore invalid json tool_call blocks
@@ -284,11 +281,38 @@ function parseLooseToolCalls(content) {
       else if (raw && !Number.isNaN(Number(raw))) value = Number(raw);
       args[key] = value;
     }
-    calls.push({
-      id: `tool_${Date.now()}_${index++}`,
-      type: "function",
-      function: { name, arguments: JSON.stringify(args) },
-    });
+    pushToolCall(name, args);
+  }
+
+  const bracketRegex = /^\s*\[([a-z_][a-z0-9_]*)\]\s*(.+?)\s*(?:\n|$)/gim;
+  let bracketMatch;
+  while ((bracketMatch = bracketRegex.exec(content))) {
+    const name = (bracketMatch[1] || "").trim();
+    const rawArgs = (bracketMatch[2] || "").trim();
+    if (!name || !rawArgs) continue;
+
+    let args = null;
+    if (rawArgs.startsWith("{") && rawArgs.endsWith("}")) {
+      try {
+        args = JSON.parse(rawArgs);
+      } catch {
+        args = null;
+      }
+    }
+    if (!args) {
+      if (name === "web_search") {
+        args = { query: rawArgs };
+      } else if (name === "fetch_url") {
+        args = { url: rawArgs };
+      } else if (name === "list_dir" || name === "read_file" || name === "stat_path") {
+        args = { path: rawArgs };
+      } else if (name === "run_command") {
+        args = { command: rawArgs };
+      } else {
+        args = { input: rawArgs };
+      }
+    }
+    pushToolCall(name, args);
   }
   return calls;
 }
@@ -332,6 +356,11 @@ export function buildEmbedding(text, dim = DEFAULT_EMBEDDING_DIM) {
     const idx = hashToken(token, dim);
     vector[idx] += 1;
   }
+  for (let i = 0; i < tokens.length - 1; i += 1) {
+    const bigram = `${tokens[i]}_${tokens[i + 1]}`;
+    const idx = hashToken(bigram, dim);
+    vector[idx] += 0.5;
+  }
   return vector;
 }
 
@@ -349,12 +378,16 @@ function cosineSimilarity(a, b) {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-function scoreMemory(mem, tokens, fullQuery) {
+function scoreMemory(mem, tokens, fullQuery, queryEmbedding) {
   if (!mem || typeof mem.content !== "string") return 0;
   const content = mem.content.toLowerCase();
   let score = 0;
 
-  if (fullQuery && content.includes(fullQuery)) score += 3;
+  if (fullQuery && content.includes(fullQuery)) {
+    if (fullQuery.length / Math.max(content.length, 1) >= 0.6) {
+      score += 3;
+    }
+  }
   for (const token of tokens) {
     if (content.includes(token)) score += 1;
   }
@@ -383,11 +416,11 @@ function scoreMemory(mem, tokens, fullQuery) {
     }
   }
 
-  if (fullQuery) {
-    const queryEmbedding = buildEmbedding(fullQuery);
-    const memEmbedding = Array.isArray(mem.embedding)
-      ? mem.embedding
-      : buildEmbedding(mem.content);
+  if (queryEmbedding) {
+    const memEmbedding =
+      Array.isArray(mem.embedding) && mem.embedding.length === queryEmbedding.length
+        ? mem.embedding
+        : buildEmbedding(mem.content);
     const sim = cosineSimilarity(queryEmbedding, memEmbedding);
     if (sim > 0) score += sim * 2;
   }
@@ -410,7 +443,7 @@ function scoreMemory(mem, tokens, fullQuery) {
   }
 
   if (mem.confirmed === false) {
-    score *= 0.6;
+    score *= 0.8;
   }
 
   return score;
@@ -425,6 +458,7 @@ export function selectRelevantMemories(
   if (!Array.isArray(memories) || memories.length === 0) return [];
   const fullQuery = isNonEmptyString(query) ? query.toLowerCase().trim() : "";
   const tokens = tokenize(fullQuery);
+  const queryEmbedding = fullQuery ? buildEmbedding(fullQuery) : null;
   const maxPinned =
     typeof options.maxPinned === "number" ? options.maxPinned : DEFAULT_MAX_PINNED;
   const maxAgeDays =
@@ -478,14 +512,14 @@ export function selectRelevantMemories(
     .filter((mem) => !isPinned(mem))
     .map((mem, index) => ({
       mem,
-      score: scoreMemory(mem, tokens, fullQuery),
+      score: scoreMemory(mem, tokens, fullQuery, queryEmbedding),
       index,
     }))
     .filter((entry) => {
       if (isInvalidated(entry.mem)) return false;
       if (!isApproved(entry.mem)) return false;
       if (entry.score < minScore) return false;
-      if (!isConfirmed(entry.mem) && entry.score < minScore + 1) return false;
+      if (!isConfirmed(entry.mem) && entry.score < minScore + 0.5) return false;
       return true;
     })
     .sort((a, b) => {
@@ -506,6 +540,12 @@ function memorySimilarity(a, b) {
   const bEmbedding = Array.isArray(b.embedding)
     ? b.embedding
     : buildEmbedding(b.content || "");
+  if (aEmbedding.length !== bEmbedding.length) {
+    return cosineSimilarity(
+      buildEmbedding(a.content || ""),
+      buildEmbedding(b.content || "")
+    );
+  }
   return cosineSimilarity(aEmbedding, bEmbedding);
 }
 
@@ -549,6 +589,16 @@ export function consolidateMemories(memories, similarityThreshold = 0.92) {
             ? primary.lastUsed
             : secondary.lastUsed
           : primary.lastUsed || secondary.lastUsed || null;
+      if (
+        typeof primary.content === "string" &&
+        typeof secondary.content === "string" &&
+        secondary.content.length > primary.content.length
+      ) {
+        primary.content = secondary.content;
+        primary.embedding = Array.isArray(secondary.embedding)
+          ? secondary.embedding
+          : buildEmbedding(secondary.content);
+      }
 
       used.add(secondary.id);
       merged.push({ from: secondary.id, into: primary.id, similarity: sim });
@@ -630,6 +680,9 @@ export function bucketMemories(memories) {
 
 export function selectMemoriesWithFallback(memories, query, limit, options) {
   if (!Array.isArray(memories) || memories.length === 0) return [];
+  if (memories.length < 30) {
+    return selectRelevantMemories(memories, query, limit, options);
+  }
   const domain = computeMemoryDomain(query, memories);
   const buckets = bucketMemories(memories);
   const domainMemories = [
@@ -650,7 +703,7 @@ function normalizeMemoryText(text) {
 function addCandidate(candidates, content, tags, reason) {
   const normalized = normalizeMemoryText(content);
   if (!normalized) return;
-  if (normalized.length > 140) return;
+  if (normalized.length > 280) return;
   const entry = {
     content: normalized,
     tags: Array.isArray(tags) ? tags.filter(Boolean) : [],
@@ -684,16 +737,99 @@ export function detectMemoryCandidates(
 
   // Identity / name
   const nameMatch = text.match(
-    /\b(?:my name is|call me|i am|i'm)\s+([^,.\n]+)\b/i
+    /\b(?:my name is|call me)\s+([^,.\n]+)\b/i
   );
   if (nameMatch) {
     const value = nameMatch[1].trim();
-    if (value.length > 1) {
+    if (value.length > 1 && !/\d/.test(value)) {
       addCandidate(
         candidates,
         `User's name is ${value}.`,
         ["identity"],
         "user identity"
+      );
+    }
+  }
+  const nameMatchAlt = text.match(/\b(?:i am|i'm)\s+([A-Za-z][^,.\n]+)\b/i);
+  if (nameMatchAlt) {
+    const value = nameMatchAlt[1].trim();
+    if (value.length > 1 && !/\d/.test(value)) {
+      addCandidate(
+        candidates,
+        `User's name is ${value}.`,
+        ["identity"],
+        "user identity"
+      );
+    }
+  }
+
+  // Age
+  const ageMatch = text.match(/\b(?:i am|i'm)\s+(\d{1,3})\b/i);
+  if (ageMatch) {
+    const age = Number.parseInt(ageMatch[1], 10);
+    if (Number.isFinite(age) && age > 3 && age < 120) {
+      addCandidate(
+        candidates,
+        `User is ${age} years old.`,
+        ["identity"],
+        "user age"
+      );
+    }
+  }
+
+  // Pets
+  const petNamedMatch = text.match(
+    /\b(?:i have|i've got|i got|my)\s+(?:a|an)?\s*(dog|cat|pet)\s+(?:named|called)\s+([^,.\n]+)\b/i
+  );
+  if (petNamedMatch) {
+    const petType = petNamedMatch[1].toLowerCase();
+    const petName = petNamedMatch[2].trim();
+    if (petName.length > 1) {
+      addCandidate(
+        candidates,
+        `User has a ${petType} named ${petName}.`,
+        ["identity", "pet"],
+        "user pet"
+      );
+    }
+  }
+  const petBreedMatch = text.match(
+    /\b(?:my\s+)?(?:dog|cat|pet)\s+(?:is|is a|is an)\s+([^,.\n]+)\b/i
+  );
+  if (petBreedMatch) {
+    const breed = petBreedMatch[1].trim();
+    if (breed.length > 2) {
+      addCandidate(
+        candidates,
+        `User's pet is a ${breed}.`,
+        ["identity", "pet"],
+        "pet breed"
+      );
+    }
+  }
+  const pronounBreedMatch = text.match(/\b(?:she|he|they)\s+(?:is|is a|is an)\s+([^,.\n]+)\b/i);
+  if (pronounBreedMatch) {
+    const breed = pronounBreedMatch[1].trim();
+    if (/\b(shiba|dog|cat|puppy|kitten)\b/i.test(breed)) {
+      addCandidate(
+        candidates,
+        `User's pet is a ${breed}.`,
+        ["identity", "pet"],
+        "pet breed"
+      );
+    }
+  }
+  const petSinceMatch = text.match(
+    /\b(?:i'?ve|i have)\s+had\s+(?:him|her|them|it)\s+since\s+i\s+was\s+(\d{1,3})\b/i
+  );
+  if (petSinceMatch) {
+    const sinceAge = Number.parseInt(petSinceMatch[1], 10);
+    if (Number.isFinite(sinceAge) && sinceAge > 3 && sinceAge < 120) {
+      addCandidate(
+        candidates,
+        `User has had their pet since age ${sinceAge}.`,
+        ["identity", "pet"],
+        "pet history"
       );
     }
   }
@@ -767,6 +903,67 @@ export function detectMemoryCandidates(
   );
 
   return filtered.slice(0, limit);
+}
+
+export function detectAssistantFacts(assistantText, existingMemories, limit = 2) {
+  if (typeof assistantText !== "string") return [];
+  const text = assistantText.trim();
+  if (!text) return [];
+  if (/\b(?:can't determine|cannot determine|not sure|unknown)\b/i.test(text)) {
+    return [];
+  }
+
+  const candidates = [];
+  const addAssistantCandidate = (content, tags) => {
+    if (alreadyKnown(content, existingMemories)) return;
+    addCandidate(candidates, content, tags, "derived from assistant output");
+  };
+
+  const osMatch = text.match(
+    /\b(?:you(?:'re| are) running|your system is running|system:\s*)(Ubuntu|Debian|Fedora|Arch|macOS|Windows(?: Server)?|Alpine|CentOS|RHEL|Red Hat|Rocky|Amazon Linux)(?:\s*v?(\d+(?:\.\d+)*))?/i
+  );
+  if (osMatch) {
+    const osName = osMatch[1];
+    const osVersion = osMatch[2] ? ` ${osMatch[2]}` : "";
+    addAssistantCandidate(
+      `System is running ${osName}${osVersion}.`,
+      ["reference", "system"]
+    );
+  }
+
+  const nodeMatch = text.match(/\bNode\.js\s*v?(\d+(?:\.\d+)+)/i);
+  if (nodeMatch) {
+    addAssistantCandidate(
+      `Node.js version is ${nodeMatch[1]}.`,
+      ["reference", "system"]
+    );
+  }
+
+  const pythonMatch = text.match(/\bPython\s+(\d+(?:\.\d+)+)/i);
+  if (pythonMatch) {
+    addAssistantCandidate(
+      `Python version is ${pythonMatch[1]}.`,
+      ["reference", "system"]
+    );
+  }
+
+  const npmMatch = text.match(/\bnpm\s+v?(\d+(?:\.\d+)+)/i);
+  if (npmMatch) {
+    addAssistantCandidate(
+      `npm version is ${npmMatch[1]}.`,
+      ["reference", "system"]
+    );
+  }
+
+  const gitMatch = text.match(/\bgit\s+version\s+(\d+(?:\.\d+)+)/i);
+  if (gitMatch) {
+    addAssistantCandidate(
+      `git version is ${gitMatch[1]}.`,
+      ["reference", "system"]
+    );
+  }
+
+  return candidates.slice(0, limit);
 }
 
 export function detectMemoryInvalidations(userText, existingMemories) {
@@ -848,6 +1045,116 @@ function looksLikeGitCommand(command) {
   return token.includes("git ");
 }
 
+function looksLikeServerStartCommand(command) {
+  const token = ` ${String(command || "").toLowerCase()} `;
+  return (
+    token.includes(" npm run dev ") ||
+    token.includes(" npm run start ") ||
+    token.includes(" pnpm dev ") ||
+    token.includes(" pnpm start ") ||
+    token.includes(" yarn dev ") ||
+    token.includes(" yarn start ") ||
+    token.includes(" bun run dev ") ||
+    token.includes(" next dev ") ||
+    token.includes(" vite ") ||
+    token.includes(" webpack-dev-server ") ||
+    token.includes(" python -m http.server ") ||
+    token.includes(" uvicorn ") ||
+    token.includes(" docker compose up ") ||
+    token.includes(" docker-compose up ")
+  );
+}
+
+function toolResultHasErrorValue(parsed) {
+  return Boolean(
+    parsed?.error ||
+      parsed?.ok === false ||
+      parsed?.timedOut === true ||
+      parsed?.started === false ||
+      (parsed?.exitCode !== undefined && parsed.exitCode !== 0)
+  );
+}
+
+function toolResultHasErrorContent(content) {
+  try {
+    const parsed = JSON.parse(content);
+    return toolResultHasErrorValue(parsed);
+  } catch {
+    return false;
+  }
+}
+
+function truncateText(value, maxChars) {
+  if (typeof value !== "string") return value;
+  if (value.length <= maxChars) return value;
+  return value.slice(0, maxChars);
+}
+
+function formatToolResultContent(toolName, result) {
+  const safeResult =
+    result && typeof result === "object" && !Array.isArray(result)
+      ? { ...result }
+      : { result };
+
+  if (toolName === "list_dir" && Array.isArray(safeResult.entries)) {
+    const total = safeResult.entries.length;
+    if (total > DEFAULT_MAX_LIST_DIR_ENTRIES) {
+      safeResult.entries = safeResult.entries.slice(0, DEFAULT_MAX_LIST_DIR_ENTRIES);
+      safeResult.truncated = true;
+      safeResult.totalEntries = total;
+      safeResult.note = `Showing first ${DEFAULT_MAX_LIST_DIR_ENTRIES} entries.`;
+    }
+  }
+
+  if (toolName === "run_command") {
+    if (typeof safeResult.stdout === "string" && safeResult.stdout.length > DEFAULT_MAX_TOOL_STREAM_CHARS) {
+      safeResult.stdout = truncateText(safeResult.stdout, DEFAULT_MAX_TOOL_STREAM_CHARS);
+      safeResult.stdoutTruncated = true;
+    }
+    if (typeof safeResult.stderr === "string" && safeResult.stderr.length > DEFAULT_MAX_TOOL_STREAM_CHARS) {
+      safeResult.stderr = truncateText(safeResult.stderr, DEFAULT_MAX_TOOL_STREAM_CHARS);
+      safeResult.stderrTruncated = true;
+    }
+  }
+
+  const json = JSON.stringify(safeResult);
+  if (json.length <= DEFAULT_MAX_TOOL_RESULT_CHARS) return json;
+  return JSON.stringify({
+    truncated: true,
+    note: "Tool result truncated to fit context window.",
+    preview: json.slice(0, DEFAULT_MAX_TOOL_RESULT_CHARS),
+  });
+}
+
+function trimToolLoopPayload(messages, maxToolRoundMessages = TOOL_LOOP_MESSAGE_LIMIT) {
+  let toolStartIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const msg = messages[i];
+    if (msg.role === "tool" || (msg.role === "assistant" && msg.tool_calls)) {
+      toolStartIndex = i;
+    } else if (msg.role === "user" && !msg.content?.startsWith("[System note]")) {
+      toolStartIndex = i + 1;
+      break;
+    }
+  }
+
+  if (toolStartIndex < 0 || toolStartIndex >= messages.length) return messages;
+
+  const prefix = messages.slice(0, toolStartIndex);
+  const toolMessages = messages.slice(toolStartIndex);
+
+  if (toolMessages.length <= maxToolRoundMessages) return messages;
+
+  const trimmed = toolMessages.slice(-maxToolRoundMessages);
+  const droppedCount = toolMessages.length - maxToolRoundMessages;
+  const summaryNote = {
+    role: "user",
+    content: `[System note] ${droppedCount} earlier tool messages trimmed. Continue with the current task.`,
+  };
+
+  return [...prefix, summaryNote, ...trimmed];
+}
+
 export async function runToolLoop({
   payload,
   callLLM,
@@ -859,6 +1166,9 @@ export async function runToolLoop({
   requireToolCall = false,
   fallbackToolCall,
   directToolOutput = false,
+  completionGuard = null,
+  buildVerifyPrompt = null,
+  toolCallGuard = null,
 }) {
   let llmResponse = await callLLM(payload);
   let assistantContent = "";
@@ -868,12 +1178,14 @@ export async function runToolLoop({
   let lastToolName = null;
   let lastToolResult = null;
   let needsVerify = false;
+  let awaitingVerificationResult = false;
+  let lastRoundHadErrors = false;
 
   for (let round = 0; round < maxToolRounds; round++) {
     const choice = llmResponse?.choices?.[0];
     const message = choice?.message;
     if (!message && requireToolCall && typeof fallbackToolCall === "function") {
-      const fallback = await fallbackToolCall(null, payload);
+      const fallback = await fallbackToolCall(null, payload, { phase: "execute" });
       if (fallback?.name) {
         const toolCall = {
           id: `tool_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -886,11 +1198,17 @@ export async function runToolLoop({
         const toolResults = [];
         const result = await executeTool(toolCall.function.name, fallback.arguments || {}, toolCall);
         if (result && result.error && !lastToolError) lastToolError = result.error;
+        if (
+          toolCall.function.name === "run_command" &&
+          looksLikeServerStartCommand(fallback.arguments?.command)
+        ) {
+          needsVerify = true;
+        }
         toolUsed = true;
         toolResults.push({
           role: "tool",
           tool_call_id: toolCall.id,
-          content: JSON.stringify(result),
+          content: formatToolResultContent(toolCall.function.name, result),
         });
         if (directToolOutput) {
           const forced = formatToolFallback(lastToolName, lastToolResult);
@@ -904,19 +1222,40 @@ export async function runToolLoop({
         });
         payload.messages.push(...toolResults);
         if (verifyToolResults) {
-          const fallbackHasErrors = toolResults.some((tr) => {
-            try {
-              const parsed = JSON.parse(tr.content);
-              return parsed?.error || parsed?.exitCode !== undefined && parsed.exitCode !== 0;
-            } catch { return false; }
-          });
+          const fallbackHasErrors = toolResults.some((tr) =>
+            toolResultHasErrorContent(tr.content)
+          );
+          if (!fallbackHasErrors && awaitingVerificationResult) {
+            awaitingVerificationResult = false;
+          }
+          lastRoundHadErrors = fallbackHasErrors;
+          let verifyContent = fallbackHasErrors
+            ? "[System note] Tool error. Retry with corrected arguments or explain the error."
+            : "[System note] Call the next tool. Only respond when ALL steps are complete and verified.";
+          if (!fallbackHasErrors && needsVerify) {
+            verifyContent =
+              "[System note] Verify the change with a tool before responding.";
+            needsVerify = false;
+            awaitingVerificationResult = true;
+          }
+          if (typeof buildVerifyPrompt === "function") {
+            const customVerifyContent = buildVerifyPrompt({
+              hasErrors: fallbackHasErrors,
+              toolCalls: [toolCall],
+              toolResults,
+              defaultPrompt: verifyContent,
+              phase: "fallback",
+            });
+            if (typeof customVerifyContent === "string" && customVerifyContent.trim()) {
+              verifyContent = customVerifyContent;
+            }
+          }
           payload.messages.push({
             role: "user",
-            content: fallbackHasErrors
-              ? "[System note] One or more tools returned an error. Read the tool results carefully. Do NOT claim success if the tool failed. Explain what went wrong. Retry with corrected arguments if possible."
-              : "[System note] Check the tool results. If incomplete, call tools again. If complete, answer the user directly.",
+            content: verifyContent,
           });
         }
+        payload.messages = trimToolLoopPayload(payload.messages, TOOL_LOOP_MESSAGE_LIMIT);
         llmResponse = await callLLM(payload);
         continue;
       }
@@ -926,19 +1265,97 @@ export async function runToolLoop({
       const parsed = parseLooseToolCalls(message.content);
       if (parsed.length > 0) {
         message.tool_calls = parsed;
-        // Preserve text before the first tool call tag instead of discarding it
-        const textBefore = message.content
-          .replace(/<tool_call>[\s\S]*$/gi, "")
-          .replace(/<function\s*=[\s\S]*$/gi, "")
-          .trim();
-        message.content = textBefore || null;
+        message.content = null;
       }
     }
 
-    if (!message?.tool_calls || message.tool_calls.length === 0) {
-      if (requireToolCall && !toolUsed) {
+    let hasToolCalls = Boolean(message?.tool_calls && message.tool_calls.length > 0);
+
+    if (!hasToolCalls) {
+      if (typeof completionGuard === "function") {
+        const guard = await completionGuard({
+          payload,
+          message,
+          round,
+          toolUsed,
+          lastToolError,
+        });
+        if (guard && guard.block === true && typeof fallbackToolCall === "function" && guard.phase) {
+          const fallback = await fallbackToolCall(message, payload, { phase: guard.phase });
+          if (fallback?.name) {
+            message.tool_calls = [
+              {
+                id: `tool_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                type: "function",
+                function: {
+                  name: fallback.name,
+                  arguments: JSON.stringify(fallback.arguments || {}),
+                },
+              },
+            ];
+            message.content = null;
+            hasToolCalls = true;
+          }
+        }
+      }
+      if (hasToolCalls) {
+        // A completion guard injected a required verification tool call.
+      } else
+      if (verifyToolResults && awaitingVerificationResult) {
         if (typeof fallbackToolCall === "function") {
-          const fallback = await fallbackToolCall(message, payload);
+          const fallback = await fallbackToolCall(message, payload, { phase: "verify" });
+          if (fallback?.name) {
+            message.tool_calls = [
+              {
+                id: `tool_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                type: "function",
+                function: {
+                  name: fallback.name,
+                  arguments: JSON.stringify(fallback.arguments || {}),
+                },
+              },
+            ];
+            message.content = null;
+          }
+        }
+      }
+      hasToolCalls = Boolean(message?.tool_calls && message.tool_calls.length > 0);
+      if (verifyToolResults && awaitingVerificationResult && !hasToolCalls) {
+        payload.messages.push(message || { role: "assistant", content: "" });
+        payload.messages.push({
+          role: "user",
+          content:
+            "[System note] Verification is still required. Call a tool now to verify before final response.",
+        });
+        payload.messages = trimToolLoopPayload(payload.messages, TOOL_LOOP_MESSAGE_LIMIT);
+        llmResponse = await callLLM(payload);
+        continue;
+      }
+      if (verifyToolResults && lastRoundHadErrors) {
+        const text = String(message?.content || "").toLowerCase();
+        const acknowledgesError =
+          text.includes("error") ||
+          text.includes("failed") ||
+          text.includes("unable") ||
+          text.includes("cannot") ||
+          text.includes("couldn't") ||
+          text.includes("timed out") ||
+          text.includes("permission");
+        if (!acknowledgesError) {
+          payload.messages.push(message || { role: "assistant", content: "" });
+          payload.messages.push({
+            role: "user",
+            content:
+              "[System note] The last tool failed. Do not claim success. Retry with corrected arguments or clearly explain the failure.",
+          });
+          payload.messages = trimToolLoopPayload(payload.messages, TOOL_LOOP_MESSAGE_LIMIT);
+          llmResponse = await callLLM(payload);
+          continue;
+        }
+      }
+      if (!hasToolCalls && requireToolCall && !toolUsed) {
+        if (typeof fallbackToolCall === "function") {
+          const fallback = await fallbackToolCall(message, payload, { phase: "execute" });
           if (fallback?.name) {
             const toolCall = {
               id: `tool_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -972,26 +1389,73 @@ export async function runToolLoop({
               content:
                 "[System note] Use a tool to answer this request. Call a tool now.",
             });
+            payload.messages = trimToolLoopPayload(payload.messages, TOOL_LOOP_MESSAGE_LIMIT);
             llmResponse = await callLLM(payload);
             continue;
           }
         } else {
           payload.messages.push(message);
           payload.messages.push({
-            role: "system",
+            role: "user",
             content:
-              "You must call a tool to answer this request. Do not answer directly. Emit only a tool call.",
+              "[System note] You must call a tool. Do not answer directly.",
           });
+          payload.messages = trimToolLoopPayload(payload.messages, TOOL_LOOP_MESSAGE_LIMIT);
           llmResponse = await callLLM(payload);
           continue;
         }
       }
-      assistantContent =
-        message?.content ||
-        llmResponse?.message?.content ||
-        llmResponse?.response ||
-        "No response content";
-      return { assistantContent, finalResponse: llmResponse };
+      hasToolCalls = Boolean(message?.tool_calls && message.tool_calls.length > 0);
+      if (!hasToolCalls) {
+        if (typeof completionGuard === "function") {
+          const guard = await completionGuard({
+            payload,
+            message,
+            round,
+            toolUsed,
+            lastToolError,
+          });
+          if (guard && guard.block === true) {
+            payload.messages.push(message || { role: "assistant", content: "" });
+            payload.messages.push({
+              role: "user",
+              content:
+                guard.note ||
+                "[System note] The task is not complete yet. Continue with tools until the result is verified.",
+            });
+            payload.messages = trimToolLoopPayload(payload.messages, TOOL_LOOP_MESSAGE_LIMIT);
+            llmResponse = await callLLM(payload);
+            continue;
+          }
+        }
+        assistantContent =
+          message?.content ||
+          llmResponse?.message?.content ||
+          llmResponse?.response ||
+          "No response content";
+        return { assistantContent, finalResponse: llmResponse };
+      }
+    }
+
+    if (typeof toolCallGuard === "function") {
+      const guard = await toolCallGuard({
+        payload,
+        message,
+        round,
+        toolUsed,
+        lastToolError,
+      });
+      if (guard && guard.block === true) {
+        payload.messages.push({
+          role: "user",
+          content:
+            guard.note ||
+            "[System note] Do not call that tool again. Answer with the information already gathered.",
+        });
+        payload.messages = trimToolLoopPayload(payload.messages, TOOL_LOOP_MESSAGE_LIMIT);
+        llmResponse = await callLLM(payload);
+        continue;
+      }
     }
 
     if (preToolSkillInjection && typeof toolSkillLoader === "function") {
@@ -1011,6 +1475,7 @@ export async function runToolLoop({
           role: "user",
           content: `[System note] ${pendingSkillBlocks.join("\n\n")}`,
         });
+        payload.messages = trimToolLoopPayload(payload.messages, TOOL_LOOP_MESSAGE_LIMIT);
         llmResponse = await callLLM(payload);
         continue;
       }
@@ -1036,11 +1501,17 @@ export async function runToolLoop({
         toolName === "write_file" ||
         toolName === "remove_path" ||
         toolName === "move_path" ||
-        toolName === "copy_path"
+        toolName === "copy_path" ||
+        toolName === "kill_process" ||
+        toolName === "start_dev_server"
       ) {
         needsVerify = true;
       } else if (toolName === "run_command") {
-        if (looksLikeWriteCommand(args?.command) || looksLikeGitCommand(args?.command)) {
+        if (
+          looksLikeWriteCommand(args?.command) ||
+          looksLikeGitCommand(args?.command) ||
+          looksLikeServerStartCommand(args?.command)
+        ) {
           needsVerify = true;
         }
       } else if (toolName === "github_repo") {
@@ -1052,7 +1523,7 @@ export async function runToolLoop({
       toolResults.push({
         role: "tool",
         tool_call_id: toolCall.id,
-        content: JSON.stringify(result),
+        content: formatToolResultContent(toolName, result),
       });
     }
 
@@ -1087,25 +1558,40 @@ export async function runToolLoop({
 
     if (verifyToolResults) {
       // Check if any tool results contain errors
-      const hasErrors = toolResults.some((tr) => {
-        try {
-          const parsed = JSON.parse(tr.content);
-          return parsed?.error || (parsed?.exitCode !== undefined && parsed.exitCode !== 0);
-        } catch { return false; }
-      });
+      const hasErrors = toolResults.some((tr) =>
+        toolResultHasErrorContent(tr.content)
+      );
+      if (!hasErrors && awaitingVerificationResult) {
+        awaitingVerificationResult = false;
+      }
+      lastRoundHadErrors = hasErrors;
       let verifyContent = hasErrors
-        ? "[System note] One or more tools returned an error. Read the tool results carefully. Do NOT claim success if the tool failed. Explain what went wrong. Retry with corrected arguments if possible."
-        : "[System note] Check the tool results. If incomplete, call tools again. If complete, answer the user directly.";
+        ? "[System note] Tool error. Retry with corrected arguments or explain the error."
+        : "[System note] Call the next tool. Only respond when ALL steps are complete and verified.";
       if (!hasErrors && needsVerify) {
         verifyContent =
-          "[System note] Verification required. Use a tool to verify the change before responding (stat_path/list_dir/read_file or git/github_repo verify).";
+          "[System note] Verify the change with a tool before responding.";
         needsVerify = false;
+        awaitingVerificationResult = true;
+      }
+      if (typeof buildVerifyPrompt === "function") {
+        const customVerifyContent = buildVerifyPrompt({
+          hasErrors,
+          toolCalls: Array.isArray(message?.tool_calls) ? message.tool_calls : [],
+          toolResults,
+          defaultPrompt: verifyContent,
+          phase: "normal",
+        });
+        if (typeof customVerifyContent === "string" && customVerifyContent.trim()) {
+          verifyContent = customVerifyContent;
+        }
       }
       payload.messages.push({
         role: "user",
         content: verifyContent,
       });
     }
+    payload.messages = trimToolLoopPayload(payload.messages, TOOL_LOOP_MESSAGE_LIMIT);
     llmResponse = await callLLM(payload);
   }
 
@@ -1121,6 +1607,20 @@ export async function runToolLoop({
     if (lastToolResult && lastToolName) {
       const forced = formatToolFallback(lastToolName, lastToolResult);
       if (forced) assistantContent = forced;
+    }
+  }
+  if (typeof completionGuard === "function") {
+    const guard = await completionGuard({
+      payload,
+      message: fallback,
+      round: maxToolRounds,
+      toolUsed,
+      lastToolError,
+    });
+    if (guard && guard.block === true) {
+      assistantContent =
+        guard.note ||
+        "I could not verify that the task completed successfully before the tool loop ended.";
     }
   }
   return { assistantContent, finalResponse: llmResponse };

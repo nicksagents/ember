@@ -22,6 +22,9 @@ export function Chat({
 }: ChatProps) {
   const [messages, setMessages] = useState<MessageData[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [liveSteps, setLiveSteps] = useState<string[]>([]);
+  const [loadingConversationId, setLoadingConversationId] = useState<string | null>(null);
+  const [requestStartedAt, setRequestStartedAt] = useState<number | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = useCallback(() => {
@@ -64,6 +67,45 @@ export function Chat({
     void loadMessages();
   }, [conversationId]);
 
+  useEffect(() => {
+    if (!isLoading || !loadingConversationId) return;
+    let cancelled = false;
+
+    const pollStatus = async () => {
+      try {
+        const res = await fetch(
+          `/api/chat/status?conversationId=${encodeURIComponent(loadingConversationId)}`,
+          { cache: "no-store" }
+        );
+        if (!res.ok) return;
+        const data: { steps?: Array<{ text?: string }> } = await res.json();
+        if (cancelled) return;
+        const steps = Array.isArray(data?.steps)
+          ? data.steps
+              .map((step) =>
+                step && typeof step.text === "string" ? step.text : ""
+              )
+              .filter(Boolean)
+          : [];
+        if (steps.length > 0) {
+          setLiveSteps(steps.slice(-6));
+        }
+      } catch {
+        // Ignore status polling errors, the main request is still authoritative.
+      }
+    };
+
+    void pollStatus();
+    const timer = setInterval(() => {
+      void pollStatus();
+    }, 1000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [isLoading, loadingConversationId]);
+
   const handleSend = useCallback(
     async (content: string) => {
       let activeId = conversationId;
@@ -86,6 +128,9 @@ export function Chat({
       // Optimistic update using functional state (no stale closure)
       setMessages((prev) => [...prev, userMessage]);
       setIsLoading(true);
+      setLoadingConversationId(activeId);
+      setLiveSteps(["Queued request"]);
+      setRequestStartedAt(Date.now());
 
       try {
         const res = await fetch("/api/chat", {
@@ -119,6 +164,9 @@ export function Chat({
         setMessages((prev) => [...prev, errorMessage]);
       } finally {
         setIsLoading(false);
+        setLoadingConversationId(null);
+        setRequestStartedAt(null);
+        setLiveSteps([]);
       }
     },
     [conversationId, onConversationUpdate, onEnsureConversation]
@@ -147,6 +195,19 @@ export function Chat({
             {isLoading && (
               <div className="flex justify-start">
                 <div className="rounded-2xl bg-zinc-800 px-4 py-2.5 text-sm text-zinc-400">
+                  <div className="text-xs font-medium text-zinc-300">
+                    Agent is working
+                    {requestStartedAt
+                      ? ` (${Math.floor((Date.now() - requestStartedAt) / 1000)}s)`
+                      : ""}
+                  </div>
+                  {liveSteps.length > 0 && (
+                    <div className="mt-2 space-y-1 text-xs text-zinc-400">
+                      {liveSteps.map((step, index) => (
+                        <div key={`${index}-${step}`}>- {step}</div>
+                      ))}
+                    </div>
+                  )}
                   <span className="inline-flex gap-1">
                     <span className="animate-bounce">·</span>
                     <span

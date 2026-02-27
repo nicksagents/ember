@@ -65,3 +65,17 @@ export async function POST(req: NextRequest) {
     );
   }
 }
+
+export async function DELETE() {
+  try {
+    const response = await fetch(`${AGENT_URL}/memories`, {
+      method: "DELETE",
+    });
+    return NextResponse.json(await response.json(), { status: response.status });
+  } catch (error) {
+    return NextResponse.json(
+      { error: "Failed to delete memories", details: error instanceof Error ? error.message : "Unknown error" },
+      { status: 502 }
+    );
+  }
+}

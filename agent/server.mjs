@@ -19,10 +19,10 @@ import {
   validateChatRequest,
   sanitizeConfigInput,
   buildSystemPrompt,
-  buildContextMessages,
   runToolLoop,
   selectRelevantMemories,
   detectMemoryCandidates,
+  detectAssistantFacts,
   detectMemoryInvalidations,
   buildEmbedding,
   consolidateMemories,
@@ -53,6 +53,15 @@ const REQUEST_TIMEOUT_MS = Number.parseInt(
 const EMBEDDINGS_ENDPOINT = process.env.EMBER_EMBEDDINGS_ENDPOINT || "";
 let _chatRequestCount = 0;
 const MEMORY_MAINTENANCE_INTERVAL = 10;
+const SUMMARY_KEEP_MESSAGES = 16;
+const SUMMARY_MIN_MESSAGES = 6;
+const SUMMARY_MAX_INPUT_CHARS = 6000;
+const SUMMARY_MAX_OUTPUT_CHARS = 800;
+const CONTEXT_CHAR_BUDGET = 18000;
+const CHAT_PROGRESS_TTL_MS = 15 * 60 * 1000;
+const CHAT_PROGRESS_MAX_STEPS = 60;
+
+const chatProgressByConversation = new Map();
 
 function getWorkspaceDefaults() {
   const homeDir = os.homedir();
@@ -143,9 +152,16 @@ const DEFAULT_CONFIG = {
   endpoint: "http://localhost:8080/v1/chat/completions",
   model: "",
   temperature: 0.7,
+  top_p: 0.8,
+  top_k: 20,
+  min_p: 0.05,
+  repetition_penalty: 1.05,
+  max_tokens: 2048,
   statelessProvider: true,
   lightweightMode: true,
   maxToolRounds: 20,
+  unrestrictedShell: false,
+  webSearchEnabled: true,
   workspaceRoot: getWorkspaceDefaults().workspaceRoot,
   desktopDir: getWorkspaceDefaults().desktopDir,
   homeDir: getWorkspaceDefaults().homeDir,
@@ -161,12 +177,11 @@ const DEFAULT_CONFIG = {
 };
 
 const DEFAULT_CORE_PROMPT = [
-  "You are Ember, a local coding assistant. Be direct and concise.",
-  "Use tools when the user asks about files, directories, or system operations.",
-  "When a tool fails, explain the error and retry if possible.",
+  "You are Ember, a local coding assistant.",
+  "Always execute tasks using tools. Never describe what you would do - do it.",
+  "If a task requires multiple steps, keep calling tools until every step is complete.",
+  "When a tool fails, retry with corrected arguments or explain the error.",
   "Save memories only for durable user preferences or identity facts.",
-  "For todo-style tasks, use task_runner and iterate next_step -> complete_step until done.",
-  "If GitHub is configured, use github_repo to create/verify repos before pushing.",
 ].join("\n");
 const DEFAULT_SOUL_MD = "You are funny, concise, and helpful.";
 
@@ -221,6 +236,45 @@ async function logEvent(event, data = {}) {
   } catch {
     // ignore logging errors
   }
+}
+
+function trimChatProgressStore() {
+  const now = Date.now();
+  for (const [conversationId, state] of chatProgressByConversation.entries()) {
+    const ageMs = now - Date.parse(state?.updatedAt || "");
+    if (!Number.isFinite(ageMs) || ageMs > CHAT_PROGRESS_TTL_MS) {
+      chatProgressByConversation.delete(conversationId);
+    }
+  }
+}
+
+function updateChatProgress(conversationId, status, text, meta = {}) {
+  if (!conversationId) return;
+  trimChatProgressStore();
+  const nowIso = new Date().toISOString();
+  const prev = chatProgressByConversation.get(conversationId);
+  const next = prev || {
+    conversationId,
+    status: "running",
+    startedAt: nowIso,
+    updatedAt: nowIso,
+    steps: [],
+  };
+  if (status) {
+    next.status = status;
+  }
+  next.updatedAt = nowIso;
+  if (typeof text === "string" && text.trim()) {
+    next.steps.push({
+      ts: nowIso,
+      text: text.trim().slice(0, 240),
+      ...meta,
+    });
+    if (next.steps.length > CHAT_PROGRESS_MAX_STEPS) {
+      next.steps = next.steps.slice(-CHAT_PROGRESS_MAX_STEPS);
+    }
+  }
+  chatProgressByConversation.set(conversationId, next);
 }
 
 function generateId(prefix) {
@@ -372,11 +426,25 @@ async function ensureWorkspaceConfig() {
         endpoint: nextConfig.endpoint,
         model: nextConfig.model,
         temperature: nextConfig.temperature,
+        top_p: nextConfig.top_p,
+        top_k: nextConfig.top_k,
+        min_p: nextConfig.min_p,
+        repetition_penalty: nextConfig.repetition_penalty,
+        max_tokens: nextConfig.max_tokens,
         statelessProvider: Boolean(nextConfig.statelessProvider),
+        unrestrictedShell: Boolean(nextConfig.unrestrictedShell),
+        webSearchEnabled: Boolean(nextConfig.webSearchEnabled),
         modelRoles: nextConfig.modelRoles,
+        lightweightMode: Boolean(nextConfig.lightweightMode),
+        maxToolRounds: Number.isFinite(nextConfig.maxToolRounds)
+          ? nextConfig.maxToolRounds
+          : DEFAULT_CONFIG.maxToolRounds,
         workspaceRoot: nextConfig.workspaceRoot,
         desktopDir: nextConfig.desktopDir,
         homeDir: nextConfig.homeDir,
+        githubUsername: nextConfig.githubUsername || "",
+        githubEmail: nextConfig.githubEmail || "",
+        githubToken: nextConfig.githubToken || "",
       },
       null,
       2
@@ -403,7 +471,14 @@ async function saveAgentConfigFromUi(input) {
         endpoint: nextConfig.endpoint,
         model: nextConfig.model,
         temperature: nextConfig.temperature,
+        top_p: nextConfig.top_p,
+        top_k: nextConfig.top_k,
+        min_p: nextConfig.min_p,
+        repetition_penalty: nextConfig.repetition_penalty,
+        max_tokens: nextConfig.max_tokens,
         statelessProvider: Boolean(nextConfig.statelessProvider),
+        unrestrictedShell: Boolean(nextConfig.unrestrictedShell),
+        webSearchEnabled: Boolean(nextConfig.webSearchEnabled),
         modelRoles: nextConfig.modelRoles,
         lightweightMode: Boolean(nextConfig.lightweightMode),
         maxToolRounds: Number.isFinite(nextConfig.maxToolRounds)
@@ -513,6 +588,11 @@ function conversationFilePath(id) {
   return path.join(PATHS.conversations, `${safe}.jsonl`);
 }
 
+function conversationSummaryPath(id) {
+  const safe = id.replace(/[^a-zA-Z0-9_-]/g, "");
+  return path.join(PATHS.conversations, `${safe}.summary.json`);
+}
+
 async function loadConversationMessages(id, limit) {
   const raw = await readText(conversationFilePath(id), "");
   if (!raw.trim()) return [];
@@ -528,6 +608,23 @@ async function loadConversationMessages(id, limit) {
     })
     .filter(Boolean);
   return limit ? parsed.slice(-limit) : parsed;
+}
+
+async function loadConversationSummary(id) {
+  const raw = await readText(conversationSummaryPath(id), "");
+  if (!raw.trim()) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+async function saveConversationSummary(id, summary) {
+  const payload = summary ? JSON.stringify(summary, null, 2) : "";
+  await withFileLock(conversationSummaryPath(id), () =>
+    writeFile(conversationSummaryPath(id), payload ? `${payload}\n` : "", "utf8")
+  );
 }
 
 async function appendToConversation(id, role, content) {
@@ -569,6 +666,27 @@ async function deleteConversation(id) {
   } catch {}
 }
 
+async function deleteAllConversations() {
+  const manifest = await loadManifest();
+  const ids = manifest.conversations.map((c) => c.id);
+  for (const id of ids) {
+    try {
+      await unlink(conversationFilePath(id));
+    } catch {}
+  }
+  try {
+    const entries = await readdir(PATHS.conversations, { withFileTypes: true });
+    await Promise.all(
+      entries
+        .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
+        .map((entry) =>
+          unlink(path.join(PATHS.conversations, entry.name)).catch(() => {})
+        )
+    );
+  } catch {}
+  await saveManifest({ conversations: [], activeId: null });
+}
+
 // ── Memories ────────────────────────────────────────────────────────────────
 
 async function loadAllMemories() {
@@ -595,6 +713,26 @@ async function loadAllMemories() {
       }
     })
     .filter(Boolean);
+}
+
+async function rehashEmbeddingsIfNeeded() {
+  if (EMBEDDINGS_ENDPOINT) return;
+  const all = await loadAllMemories();
+  if (all.length === 0) return;
+  const targetDim = buildEmbedding("x").length;
+  let changed = false;
+  const updated = all.map((mem) => {
+    if (!mem || typeof mem.content !== "string") return mem;
+    const embedding = Array.isArray(mem.embedding) ? mem.embedding : null;
+    if (!embedding || embedding.length !== targetDim) {
+      changed = true;
+      return { ...mem, embedding: buildEmbedding(mem.content) };
+    }
+    return mem;
+  });
+  if (changed) {
+    await updateMemories(updated);
+  }
 }
 
 // ── Tasks ───────────────────────────────────────────────────────────────────
@@ -805,6 +943,12 @@ async function deleteMemory(targetId) {
   );
 }
 
+async function deleteAllMemories() {
+  await withFileLock(PATHS.memoriesIndex, () =>
+    writeFile(PATHS.memoriesIndex, "", "utf8")
+  );
+}
+
 async function updateMemories(updated) {
   const content = updated.length
     ? updated.map((m) => JSON.stringify(m)).join("\n") + "\n"
@@ -850,20 +994,38 @@ async function updateMemoryById(id, updates) {
 
 async function consolidateMemoryStore() {
   const all = await loadAllMemories();
-  const { updated, merged } = consolidateMemories(all, 0.92);
+  const isSummary = (mem) =>
+    mem?.type === "cluster" ||
+    (Array.isArray(mem?.tags) && mem.tags.includes("summary"));
+  const usable = all.filter((mem) => !isSummary(mem));
+  const excluded = all.filter((mem) => isSummary(mem));
+  const threshold = EMBEDDINGS_ENDPOINT ? 0.92 : 0.85;
+  const { updated, merged } = consolidateMemories(usable, threshold);
   if (merged.length > 0) {
-    await updateMemories(updated);
+    await updateMemories([...updated, ...excluded]);
   }
 }
 
 function decayConfidence(mem) {
   if (!mem?.ts || typeof mem.confidence !== "number") return mem;
+  if (Array.isArray(mem?.tags) && mem.tags.includes("pin")) return mem;
+  const type = typeof mem?.type === "string" ? mem.type : "";
+  if (type === "identity") return mem;
   const now = Date.now();
   const created = Date.parse(mem.ts);
   if (!Number.isFinite(created)) return mem;
   const ageDays = (now - created) / 86_400_000;
   if (!Number.isFinite(ageDays) || ageDays < 0) return mem;
-  const halfLifeDays = mem.type === "reference" ? 60 : 180;
+  const halfLifeDays =
+    type === "preference"
+      ? 365
+      : type === "workflow"
+        ? 180
+        : type === "project"
+          ? 90
+          : type === "reference"
+            ? 60
+            : 180;
   const decay = Math.exp(-Math.log(2) * ageDays / halfLifeDays);
   const nextConfidence = Math.max(0.2, mem.confidence * decay);
   if (Math.abs(nextConfidence - mem.confidence) < 0.01) return mem;
@@ -883,55 +1045,160 @@ async function decayMemories() {
   }
 }
 
-function buildMemorySummaryCluster(memories, clusterIds) {
-  const items = memories.filter((m) => clusterIds.includes(m.id));
-  if (items.length < 3) return null;
-  const snippets = items
-    .map((m) => (typeof m.content === "string" ? m.content.trim() : ""))
-    .filter(Boolean)
-    .map((c) => c.split(" ").slice(0, 6).join(" "))
-    .slice(0, 5);
-  if (snippets.length < 3) return null;
-  return `Summary cluster: ${snippets.join(" · ")}`;
+function memoryKeepScore(mem, now = Date.now()) {
+  if (!mem) return -Infinity;
+  if (Array.isArray(mem.tags) && mem.tags.includes("pin")) return 1e6;
+  const type = typeof mem.type === "string" ? mem.type : "";
+  if (type === "identity") return 1e5;
+  const typeWeight =
+    type === "preference"
+      ? 8
+      : type === "workflow"
+        ? 7
+        : type === "project"
+          ? 6
+          : type === "reference"
+            ? 5
+            : 4;
+  const confidence = typeof mem.confidence === "number" ? mem.confidence : 1;
+  const useCount = typeof mem.useCount === "number" ? mem.useCount : 0;
+  const last = mem.lastUsed || mem.ts;
+  const ageMs = last ? now - Date.parse(last) : 0;
+  const ageDays = Number.isFinite(ageMs) ? ageMs / 86_400_000 : 0;
+  const recency = Math.max(0, 6 - ageDays / 30);
+  return confidence * 6 + Math.min(6, Math.log1p(useCount)) + typeWeight + recency;
 }
 
-async function summarizeMemoryClusters() {
+async function compressOldMemories(maxKeep = 200) {
   const all = await loadAllMemories();
-  if (all.length < 6) return;
-  const { updated } = consolidateMemories(all, 0.88);
-  const existingSummaries = new Set(
-    updated
-      .filter((m) => Array.isArray(m.tags) && m.tags.includes("cluster"))
-      .map((m) => m.source?.clusterKey)
-      .filter(Boolean)
+  const isSummary = (mem) =>
+    mem?.type === "cluster" ||
+    (Array.isArray(mem?.tags) && mem.tags.includes("summary"));
+  const real = all.filter((mem) => !isSummary(mem));
+  if (real.length <= maxKeep) return;
+  const now = Date.now();
+  const pinnedOrIdentity = (mem) =>
+    (Array.isArray(mem?.tags) && mem.tags.includes("pin")) || mem?.type === "identity";
+  const candidates = real.filter((mem) => !pinnedOrIdentity(mem));
+  const dropCount = Math.max(0, real.length - maxKeep);
+  if (dropCount === 0 || candidates.length === 0) return;
+  const toDrop = candidates
+    .slice()
+    .sort((a, b) => memoryKeepScore(a, now) - memoryKeepScore(b, now))
+    .slice(0, dropCount)
+    .map((m) => m.id);
+  if (toDrop.length === 0) return;
+  const dropSet = new Set(toDrop);
+  const kept = all.filter((mem) => !dropSet.has(mem.id));
+  await updateMemories(kept);
+}
+
+function buildSummaryPrompt(existingSummary, messages) {
+  const lines = [];
+  let totalChars = 0;
+  for (const msg of messages) {
+    if (!msg || typeof msg.content !== "string") continue;
+    const role = msg.role || "user";
+    const trimmed = msg.content.trim();
+    if (!trimmed) continue;
+    const line = `${role}: ${trimmed.slice(0, 300)}`;
+    if (totalChars + line.length > SUMMARY_MAX_INPUT_CHARS) break;
+    lines.push(line);
+    totalChars += line.length + 1;
+  }
+
+  const existing = existingSummary
+    ? `Previous summary: ${existingSummary}\n\n`
+    : "";
+
+  return (
+    `${existing}Summarize this conversation in 3-5 bullet points. ` +
+    "Keep only facts, decisions, and unfinished tasks. Max 500 chars total.\n\n" +
+    lines.join("\n")
   );
+}
 
-  const clusterKey = updated
-    .slice(-6)
-    .map((m) => m.id)
-    .sort()
-    .join(":");
-
-  if (existingSummaries.has(clusterKey)) return;
-  const summaryText = buildMemorySummaryCluster(updated, updated.slice(-6).map((m) => m.id));
-  if (!summaryText) return;
-
-  const summary = {
-    id: generateId("mem"),
-    ts: new Date().toISOString(),
-    content: summaryText,
-    tags: ["cluster", "summary"],
-    type: "cluster",
-    confirmed: false,
-    confidence: 0.5,
-    embedding: buildEmbedding(summaryText),
-    useCount: 0,
-    lastUsed: null,
-    source: { kind: "auto_summary", clusterKey },
+async function summarizeConversationHistory(config, existingSummary, messages) {
+  if (!Array.isArray(messages) || messages.length < SUMMARY_MIN_MESSAGES) {
+    return existingSummary || "";
+  }
+  const prompt = buildSummaryPrompt(existingSummary, messages);
+  const payload = {
+    messages: [
+      {
+        role: "system",
+        content: "You compress conversations into short working summaries.",
+      },
+      { role: "user", content: prompt },
+    ],
+    temperature: 0.1,
+    top_p: 0.6,
+    stream: false,
   };
+  const activeModel = config?.modelRoles?.assistant || config?.model;
+  if (activeModel) payload.model = activeModel;
 
-  const next = [...updated, summary];
-  await updateMemories(next);
+  try {
+    const response = await fetchWithTimeout(config.endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) return existingSummary || "";
+    const data = await response.json();
+    const summary =
+      data?.choices?.[0]?.message?.content?.trim() ||
+      data?.response ||
+      "";
+    return summary.slice(0, SUMMARY_MAX_OUTPUT_CHARS);
+  } catch {
+    return existingSummary || "";
+  }
+}
+
+async function pruneMemorySummaries() {
+  const all = await loadAllMemories();
+  if (all.length === 0) return;
+  const isSummary = (mem) =>
+    (Array.isArray(mem?.tags) && mem.tags.includes("summary")) ||
+    mem?.source?.kind === "auto_summary";
+  const summaries = all.filter(isSummary);
+  if (summaries.length === 0) return;
+
+  const usableIds = new Set(all.filter((m) => !isSummary(m)).map((m) => m.id));
+  const cleaned = all.filter((mem) => {
+    if (!isSummary(mem)) return true;
+    const content = typeof mem.content === "string" ? mem.content : "";
+    const repeats = (content.match(/Summary cluster:/g) || []).length;
+    if (repeats >= 2) return false;
+    const clusterKey = mem?.source?.clusterKey;
+    if (clusterKey) {
+      const ids = clusterKey.split(":").filter(Boolean);
+      const hasAny = ids.some((id) => usableIds.has(id));
+      if (!hasAny) return false;
+    }
+    return true;
+  });
+
+  const MAX_SUMMARIES = 12;
+  const remainingSummaries = cleaned.filter(isSummary);
+  if (remainingSummaries.length > MAX_SUMMARIES) {
+    const toDrop = remainingSummaries
+      .slice()
+      .sort(
+        (a, b) =>
+          (Date.parse(a.ts || "") || 0) - (Date.parse(b.ts || "") || 0)
+      )
+      .slice(0, remainingSummaries.length - MAX_SUMMARIES)
+      .map((m) => m.id);
+    const dropSet = new Set(toDrop);
+    await updateMemories(cleaned.filter((m) => !dropSet.has(m.id)));
+    return;
+  }
+
+  if (cleaned.length !== all.length) {
+    await updateMemories(cleaned);
+  }
 }
 
 async function markMemoriesUsed(ids) {
@@ -952,6 +1219,7 @@ async function markMemoriesUsed(ids) {
       ...mem,
       lastUsed: now,
       useCount: nextUseCount,
+      confidence: Math.max(mem.confidence || 0, 0.9),
       tags: shouldPromote
         ? Array.from(new Set([...(mem.tags || []), "pin"]))
         : mem.tags || [],
@@ -1228,6 +1496,153 @@ registry.register({
 });
 
 registry.register({
+  name: "web_search",
+  description:
+    "Search the web quickly for current information and return result titles, URLs, and snippets. Use this first for simple current-info lookups; only fetch pages when snippets are not enough.",
+  parameters: {
+    type: "object",
+    properties: {
+      query: { type: "string", description: "Search query" },
+      limit: { type: "number", description: "Maximum results to return (1-10)" },
+      site: { type: "string", description: "Optional site/domain filter such as example.com" },
+    },
+    required: ["query"],
+  },
+  keywords: ["search", "web", "internet", "lookup", "google"],
+  handler: async (args) => {
+    const cfg = await loadConfig();
+    if (!cfg.webSearchEnabled) {
+      return { error: "Web search is disabled in settings" };
+    }
+    const query = String(args.query || "").trim();
+    if (!query) return { error: "query is required" };
+    const limit = Math.max(1, Math.min(10, Number.parseInt(String(args.limit || "5"), 10) || 5));
+    const site = String(args.site || "").trim().toLowerCase();
+    const siteFilter = /^[a-z0-9.-]+\.[a-z]{2,}$/.test(site) ? site : "";
+    const effectiveQuery = siteFilter ? `${query} site:${siteFilter}` : query;
+    const apiUrl =
+      `https://api.duckduckgo.com/?q=${encodeURIComponent(effectiveQuery)}` +
+      "&format=json&no_html=1&skip_disambig=1&no_redirect=1";
+    const htmlUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(effectiveQuery)}`;
+    try {
+      const apiRes = await fetchWithTimeout(
+        apiUrl,
+        {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (compatible; ember-agent/1.0)",
+            Accept: "application/json,text/plain,*/*",
+          },
+        },
+        15000
+      );
+      let results = [];
+      if (apiRes.ok) {
+        const apiData = await apiRes.json().catch(() => ({}));
+        results = parseDuckDuckGoInstantAnswer(apiData, limit);
+      }
+
+      if (results.length < limit) {
+        const htmlRes = await fetchWithTimeout(
+          htmlUrl,
+          {
+            headers: {
+              "User-Agent": "Mozilla/5.0 (compatible; ember-agent/1.0)",
+              Accept: "text/html,application/xhtml+xml",
+            },
+          },
+          15000
+        );
+        if (htmlRes.ok) {
+          const html = await htmlRes.text();
+          const fallbackResults = parseDuckDuckGoResults(html, limit);
+          for (const item of fallbackResults) {
+            if (results.length >= limit) break;
+            if (!results.some((existing) => existing.url === item.url)) {
+              results.push(item);
+            }
+          }
+        }
+      }
+
+      return {
+        query,
+        effectiveQuery,
+        site: siteFilter,
+        results: results.slice(0, limit),
+        count: Math.min(results.length, limit),
+        engine: "duckduckgo",
+      };
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.message : "Search request failed",
+        query,
+      };
+    }
+  },
+});
+
+registry.register({
+  name: "fetch_url",
+  description:
+    "Fetch a URL and return readable text content from the page. Use this after web_search when you need the page details.",
+  parameters: {
+    type: "object",
+    properties: {
+      url: { type: "string", description: "URL to fetch" },
+      maxChars: { type: "number", description: "Maximum text characters to return" },
+    },
+    required: ["url"],
+  },
+  keywords: ["fetch", "url", "scrape", "webpage", "page", "read"],
+  handler: async (args) => {
+    const cfg = await loadConfig();
+    if (!cfg.webSearchEnabled) {
+      return { error: "Web search is disabled in settings" };
+    }
+    const targetUrl = String(args.url || "").trim();
+    if (!targetUrl) return { error: "url is required" };
+    const maxChars = Math.max(
+      500,
+      Math.min(20000, Number.parseInt(String(args.maxChars || "6000"), 10) || 6000)
+    );
+    try {
+      const res = await fetchWithTimeout(
+        targetUrl,
+        {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (compatible; ember-agent/1.0)",
+            Accept: "text/html,text/plain,application/xhtml+xml",
+          },
+        },
+        20000
+      );
+      if (!res.ok) {
+        return { error: `Fetch failed (${res.status})`, status: res.status, url: targetUrl };
+      }
+      const contentType = res.headers.get("content-type") || "";
+      const body = await res.text();
+      const title = contentType.includes("html") ? extractHtmlTitle(body) : "";
+      const text = (contentType.includes("html") ? stripHtmlToText(body) : body.trim()).slice(
+        0,
+        maxChars
+      );
+      return {
+        url: targetUrl,
+        title,
+        contentType,
+        text,
+        truncated: text.length >= maxChars,
+      };
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.message : "Fetch failed",
+        url: targetUrl,
+      };
+    }
+  },
+});
+
+registry.register({
   name: "task_runner",
   description:
     "Create and manage lightweight tasks with steps. Use to store a todo list and iterate steps until done.",
@@ -1336,6 +1751,112 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = REQUEST_TIMEOUT_M
   }
 }
 
+function decodeHtmlEntities(text) {
+  return String(text || "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, " ");
+}
+
+function stripHtmlToText(html) {
+  return decodeHtmlEntities(
+    String(html || "")
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+      .replace(/<\/(p|div|article|section|li|h1|h2|h3|h4|h5|h6|br)>/gi, "\n")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\r/g, "")
+      .replace(/\n{3,}/g, "\n\n")
+      .replace(/[ \t]{2,}/g, " ")
+      .trim()
+  );
+}
+
+function extractHtmlTitle(html) {
+  const match = String(html || "").match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  return match ? decodeHtmlEntities(match[1]).trim() : "";
+}
+
+function resolveSearchResultUrl(rawUrl) {
+  const urlText = String(rawUrl || "").trim();
+  if (!urlText) return "";
+  try {
+    const parsed = new URL(urlText, "https://duckduckgo.com");
+    if (parsed.hostname.endsWith("duckduckgo.com")) {
+      const uddg = parsed.searchParams.get("uddg");
+      if (uddg) return decodeURIComponent(uddg);
+    }
+    return parsed.toString();
+  } catch {
+    return urlText;
+  }
+}
+
+function parseDuckDuckGoResults(html, limit = 5) {
+  const results = [];
+  const regex =
+    /<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?(?:<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>|<div[^>]*class="[^"]*result__snippet[^"]*"[^>]*>)([\s\S]*?)(?:<\/a>|<\/div>)/gi;
+  let match;
+  while ((match = regex.exec(String(html || ""))) && results.length < limit) {
+    const url = resolveSearchResultUrl(match[1]);
+    const title = stripHtmlToText(match[2]).slice(0, 200);
+    const snippet = stripHtmlToText(match[3]).slice(0, 400);
+    if (!url || !title) continue;
+    results.push({ title, url, snippet });
+  }
+  return results;
+}
+
+function flattenDuckDuckGoTopics(items, output = []) {
+  for (const item of Array.isArray(items) ? items : []) {
+    if (Array.isArray(item?.Topics)) {
+      flattenDuckDuckGoTopics(item.Topics, output);
+      continue;
+    }
+    if (item && (item.Text || item.FirstURL)) {
+      output.push(item);
+    }
+  }
+  return output;
+}
+
+function parseDuckDuckGoInstantAnswer(data, limit = 5) {
+  const results = [];
+  const addResult = (title, url, snippet, source = "instant_answer") => {
+    const safeTitle = String(title || "").trim();
+    const safeUrl = String(url || "").trim();
+    const safeSnippet = String(snippet || "").trim();
+    if (!safeTitle || !safeUrl) return;
+    if (results.some((item) => item.url === safeUrl)) return;
+    results.push({
+      title: safeTitle.slice(0, 200),
+      url: safeUrl,
+      snippet: safeSnippet.slice(0, 400),
+      source,
+    });
+  };
+
+  if (data?.AbstractURL) {
+    addResult(
+      data?.Heading || "DuckDuckGo Instant Answer",
+      data.AbstractURL,
+      data.AbstractText || "",
+      "abstract"
+    );
+  }
+
+  for (const topic of flattenDuckDuckGoTopics(data?.RelatedTopics || [])) {
+    if (results.length >= limit) break;
+    addResult(topic?.Text || topic?.FirstURL, topic?.FirstURL, topic?.Text || "", "related");
+  }
+
+  return results.slice(0, limit);
+}
+
 async function embedText(text) {
   const input = typeof text === "string" ? text : "";
   if (!EMBEDDINGS_ENDPOINT) return buildEmbedding(input);
@@ -1354,9 +1875,309 @@ async function embedText(text) {
   }
 }
 
+function looksLikeServerTaskRequest(userContent) {
+  const text = String(userContent || "").toLowerCase();
+  return (
+    /\b(server|dev server|development server|localhost|0\.0\.0\.0|127\.0\.0\.1|port\s+\d{2,5})\b/.test(
+      text
+    ) ||
+    /\bnpm run dev\b/.test(text)
+  );
+}
+
+function classifyProcessTask(userContent) {
+  if (!looksLikeServerTaskRequest(userContent)) return null;
+  const text = String(userContent || "").toLowerCase();
+  const port = extractRequestedPort(userContent, 3000);
+  const host = extractRequestedHost(userContent, "0.0.0.0");
+
+  const isStop =
+    /\b(kill|stop|shutdown|shut down|terminate|end|close)\b/.test(text) ||
+    /\bfree up\b/.test(text);
+  const isRestart =
+    /\b(restart|reboot|reload|relaunch)\b/.test(text) ||
+    (/\bstart\b/.test(text) && isStop);
+  const isVerify =
+    /\b(verify|check|confirm|is it running|make sure)\b/.test(text) &&
+    !/\b(start|run|host|serve|launch)\b/.test(text);
+  const isStart =
+    /\b(start|run|host|serve|launch|boot)\b/.test(text) ||
+    /\bnpm run dev\b/.test(text);
+
+  let intent = "inspect";
+  if (isRestart) intent = "restart";
+  else if (isStop) intent = "stop";
+  else if (isStart) intent = "start";
+  else if (isVerify) intent = "verify_up";
+
+  return { intent, host, port };
+}
+
+function looksLikeWebLookupRequest(userContent) {
+  const text = String(userContent || "").toLowerCase();
+  if (/\b(search|look\s*up|google|browse)\s+(the\s+)?(web|internet|online)\b/.test(text)) {
+    return true;
+  }
+  if (
+    /\b(?:search|look\s*up|find|check)\b/.test(text) &&
+    /\b(?:events?|concerts?|shows?|things to do|weather|forecast|price|prices|news|happening|tonight|today|tomorrow|weekend)\b/.test(text)
+  ) {
+    return true;
+  }
+  if (/\b(?:what'?s|what is)\s+happening\b/.test(text)) {
+    return true;
+  }
+  if (
+    /\b(?:events?|concerts?|shows?|things to do|happening)\b/.test(text) &&
+    /\b(?:today|tonight|tomorrow|this weekend|weekend|near me)\b/.test(text)
+  ) {
+    return true;
+  }
+  if (
+    /\bwhat\s+can\s+i\s+do\b/.test(text) &&
+    /\b(?:today|tonight|tomorrow|this weekend|weekend|near me)\b/.test(text)
+  ) {
+    return true;
+  }
+  if (
+    /\b(?:recommend|suggest|find)\b/.test(text) &&
+    /\b(?:something|somewhere|things?)\s+to\s+do\b/.test(text)
+  ) {
+    return true;
+  }
+  if (/https?:\/\//.test(text)) {
+    return true;
+  }
+  if (/\b(latest|current|recent)\b/.test(text) && /\b(version|release|update|news|article|blog|tutorial)\b/.test(text)) {
+    return true;
+  }
+  return false;
+}
+
+function extractWebSearchSite(userContent) {
+  const text = String(userContent || "").trim();
+  const match =
+    text.match(/\bsite:([a-z0-9.-]+\.[a-z]{2,})\b/i) ||
+    text.match(/\b(?:on|from|within)\s+([a-z0-9.-]+\.[a-z]{2,})\b/i);
+  return match ? match[1].toLowerCase() : "";
+}
+
+function buildWebSearchQuery(userContent) {
+  let text = String(userContent || "").trim();
+  if (!text) return "";
+
+  text = text.replace(/\bsite:[^\s]+\b/gi, " ");
+  text = text.replace(/\b(?:on|from|within)\s+[a-z0-9.-]+\.[a-z]{2,}\b/gi, " ");
+  text = text.replace(/^[\s,]*(?:can|could|would|will)\s+you\s+/i, "");
+  text = text.replace(/^[\s,]*please\s+/i, "");
+  text = text.replace(/^[\s,]*(?:i need you to|help me)\s+/i, "");
+  text = text.replace(/\b(?:look\s*up|search(?:\s+for)?|find|check)\b\s*/i, "");
+  text = text.replace(/\b(?:tell me|show me)\b\s*/i, "");
+  text = text.replace(/\bif there (?:are|is) any\b/i, "");
+  text = text.replace(/\b(?:are|is) there any\b/i, "");
+  text = text.replace(/\?+$/, "");
+  text = text.replace(/\s+/g, " ").trim();
+
+  return text || String(userContent || "").trim();
+}
+
+function inferWebSearchLimit(userContent) {
+  const text = String(userContent || "").toLowerCase();
+  if (/\b(?:today|tonight|tomorrow|this weekend|weekend|right now|currently)\b/.test(text)) {
+    return 3;
+  }
+  if (/\b(?:events?|concerts?|shows?|things to do|weather|forecast|price|prices|news|happening)\b/.test(text)) {
+    return 3;
+  }
+  return 5;
+}
+
+function extractRequestedPort(userContent, fallback = 3000) {
+  const text = String(userContent || "");
+  const match =
+    text.match(/\bport\s+(\d{2,5})\b/i) ||
+    text.match(/:(\d{2,5})\b/) ||
+    text.match(/\bon\s+(\d{2,5})\b/i);
+  const port = Number.parseInt(match?.[1] || "", 10);
+  if (!Number.isFinite(port) || port < 1 || port > 65535) return fallback;
+  return port;
+}
+
+function extractRequestedHost(userContent, fallback = "0.0.0.0") {
+  const text = String(userContent || "").toLowerCase();
+  if (text.includes("0.0.0.0")) return "0.0.0.0";
+  if (text.includes("127.0.0.1")) return "127.0.0.1";
+  if (text.includes("localhost")) return "127.0.0.1";
+  return fallback;
+}
+
+function inferProjectDirectory(userContent, config) {
+  const text = String(userContent || "");
+  const home = config.homeDir || os.homedir();
+  const desktop = config.desktopDir || path.join(home, "Desktop");
+  const workspaceRoot = config.workspaceRoot || home;
+
+  const desktopPathMatch = text.match(/desktop\/([a-zA-Z0-9._-]+)/i);
+  if (desktopPathMatch) {
+    return path.join(desktop, desktopPathMatch[1]);
+  }
+
+  const folderMatch =
+    text.match(/(?:inside|in)\s+the\s+([a-zA-Z0-9._-]+)\s+folder(?:\s+on\s+the\s+desktop)?/i) ||
+    text.match(/\b([a-zA-Z0-9._-]+)\s+folder\s+on\s+the\s+desktop\b/i);
+  if (folderMatch) {
+    return path.join(desktop, folderMatch[1]);
+  }
+
+  const absoluteishMatch = text.match(/([~/.][^\s]+)/);
+  if (absoluteishMatch) {
+    const raw = absoluteishMatch[1];
+    if (raw.startsWith("~/")) return path.join(home, raw.slice(2));
+    if (raw.startsWith("./")) return path.join(workspaceRoot, raw.slice(2));
+    if (raw.startsWith("/")) return raw;
+  }
+
+  return "";
+}
+
+function inferServerStartCommand(userContent) {
+  const text = String(userContent || "").toLowerCase();
+  if (text.includes("pnpm")) return "pnpm dev";
+  if (text.includes("yarn")) return "yarn dev";
+  if (text.includes("bun")) return "bun run dev";
+  if (text.includes("npm run start")) return "npm run start";
+  return "npm run dev";
+}
+
+function inspectToolLoopMessages(messages) {
+  const toolByCallId = new Map();
+  const usedNames = [];
+  const lastResultByName = new Map();
+  for (const msg of Array.isArray(messages) ? messages : []) {
+    if (msg?.role === "assistant" && Array.isArray(msg.tool_calls)) {
+      for (const toolCall of msg.tool_calls) {
+        const name = toolCall?.function?.name;
+        const id = toolCall?.id;
+        if (!name || !id) continue;
+        toolByCallId.set(id, name);
+        usedNames.push(name);
+      }
+      continue;
+    }
+    if (msg?.role === "tool" && msg.tool_call_id) {
+      const name = toolByCallId.get(msg.tool_call_id);
+      if (!name) continue;
+      try {
+        lastResultByName.set(name, JSON.parse(msg.content || "{}"));
+      } catch {
+        lastResultByName.set(name, {});
+      }
+    }
+  }
+  return {
+    usedNames,
+    hasUsed(name) {
+      return usedNames.includes(name);
+    },
+    lastResult(name) {
+      return lastResultByName.get(name);
+    },
+  };
+}
+
+function buildServerCompletionGuard(userContent) {
+  const task = classifyProcessTask(userContent);
+  if (!task) return null;
+  const expectedHost = task.host;
+  const expectedPort = task.port;
+  return ({ payload }) => {
+    const loopState = inspectToolLoopMessages(payload?.messages || []);
+    if (task.intent === "stop") {
+      const scan = loopState.lastResult("list_processes");
+      const verifiedStopped =
+        scan &&
+        Number(scan.port) === Number(expectedPort) &&
+        Number(scan.count) === 0;
+      if (verifiedStopped) return null;
+      return {
+        block: true,
+        phase: "verify_stopped",
+        note:
+          `[System note] The task is not done until list_processes confirms port ` +
+          `${expectedPort} is free.`,
+      };
+    }
+    const verification = loopState.lastResult("verify_server");
+    const verifiedUp =
+      verification &&
+      verification.ok === true &&
+      Number(verification.port) === Number(expectedPort) &&
+      String(verification.host || expectedHost) === String(expectedHost);
+    if (verifiedUp) return null;
+    return {
+      block: true,
+      phase: "verify",
+      note:
+        `[System note] The task is not done until verify_server succeeds for ` +
+        `${expectedHost}:${expectedPort}. Use tools and verify before final response.`,
+    };
+  };
+}
+
+function describeToolProgress(name, args, result, phase = "running") {
+  if (name === "list_processes") {
+    if (phase === "running") {
+      return args?.port
+        ? `Inspecting processes on port ${args.port}`
+        : "Inspecting running processes";
+    }
+    return result?.count > 0
+      ? `Found ${result.count} matching process${result.count === 1 ? "" : "es"}`
+      : "No matching processes found";
+  }
+  if (name === "kill_process") {
+    if (phase === "running") {
+      return args?.port
+        ? `Stopping processes on port ${args.port}`
+        : `Stopping process ${args?.pid || ""}`.trim();
+    }
+    return result?.killed ? "Processes stopped" : "No process was stopped";
+  }
+  if (name === "start_dev_server") {
+    if (phase === "running") {
+      return `Starting local server on ${args?.host || "0.0.0.0"}:${args?.port || 3000}`;
+    }
+    return result?.started
+      ? `Local server started on ${result.host || args?.host || "0.0.0.0"}:${result.port || args?.port || 3000}`
+      : "Local server failed to start";
+  }
+  if (name === "verify_server") {
+    if (phase === "running") {
+      return `Verifying local server on ${args?.host || "127.0.0.1"}:${args?.port || 3000}`;
+    }
+    return result?.ok
+      ? `Verified local server on ${result.host || args?.host || "127.0.0.1"}:${result.port || args?.port || 3000}`
+      : `Server verification failed on ${result?.host || args?.host || "127.0.0.1"}:${result?.port || args?.port || 3000}`;
+  }
+  if (name === "web_search") {
+    if (phase === "running") {
+      return "Searching the web";
+    }
+    return result?.count > 0 ? `Found ${result.count} web results` : "No web results found";
+  }
+  if (name === "fetch_url") {
+    if (phase === "running") {
+      return "Fetching page text";
+    }
+    return result?.error ? "Failed to fetch page text" : "Fetched page text";
+  }
+  return phase === "running" ? `Tool: ${name} (running)` : `Tool: ${name} (${phase})`;
+}
+
 // ── Route handlers ──────────────────────────────────────────────────────────
 
 async function handleChat(req, res) {
+  let activeConversationId = "";
   try {
     const body = await readJsonBody(req);
     const validation = validateChatRequest(body);
@@ -1364,12 +2185,15 @@ async function handleChat(req, res) {
       return sendJson(res, 400, { error: validation.errors.join(", ") });
     }
     const { conversationId, content: userContent } = validation.data;
+    activeConversationId = conversationId;
     await logEvent("chat_request", {
       conversationId,
       content: userContent,
     });
+    updateChatProgress(conversationId, "running", "Queued request");
 
     const config = await loadConfig(sanitizeConfigInput(body.config));
+    fsPolicy.unrestrictedShell = Boolean(config.unrestrictedShell);
 
     // Load conversation history from disk
     const history = await loadConversationMessages(conversationId);
@@ -1377,19 +2201,54 @@ async function handleChat(req, res) {
     // Append user message to conversation file
     await appendToConversation(conversationId, "user", userContent);
 
-    // Build context: last N messages to stay within context window
-    const contextLimit = 30;
-    let contextMessages = buildContextMessages(
-      history,
-      userContent,
-      contextLimit
-    );
+    // Build context with structured summary compression
+    updateChatProgress(conversationId, "running", "Preparing context");
+    const summaryState = await loadConversationSummary(conversationId);
+    const keepMessages = SUMMARY_KEEP_MESSAGES;
+    const recentMessages =
+      history.length > keepMessages ? history.slice(-keepMessages) : history;
+    const olderMessages =
+      history.length > keepMessages ? history.slice(0, -keepMessages) : [];
+    const lastSummarizedTs = summaryState?.uptoTs;
+    const newForSummary = lastSummarizedTs
+      ? olderMessages.filter((m) => m.ts && Date.parse(m.ts) > Date.parse(lastSummarizedTs))
+      : olderMessages;
+    let summaryText = summaryState?.summary || "";
+    let pendingSummary = null;
+    if (newForSummary.length >= SUMMARY_MIN_MESSAGES) {
+      pendingSummary = {
+        config,
+        existingSummary: summaryText,
+        messages: newForSummary,
+        conversationId,
+      };
+    }
 
-    // Character budget: trim oldest messages if total exceeds limit
-    const CONTEXT_CHAR_BUDGET = 12000;
-    let totalChars = contextMessages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
-    while (totalChars > CONTEXT_CHAR_BUDGET && contextMessages.length > 2) {
-      const removed = contextMessages.shift();
+    let contextMessages = recentMessages.map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
+    contextMessages.push({ role: "user", content: userContent });
+    if (summaryText) {
+      contextMessages.unshift({
+        role: "user",
+        content:
+          `[Conversation summary — do not respond to this, it is context only]\n${summaryText}`,
+      });
+    }
+
+    // Character budget: trim oldest recent messages if total exceeds limit
+    let totalChars = contextMessages.reduce(
+      (sum, m) => sum + (m.content?.length || 0),
+      0
+    );
+    while (
+      totalChars > CONTEXT_CHAR_BUDGET &&
+      contextMessages.length > 2
+    ) {
+      const removed = contextMessages[summaryText ? 1 : 0];
+      if (!removed) break;
+      contextMessages.splice(summaryText ? 1 : 0, 1);
       totalChars -= (removed.content?.length || 0);
     }
 
@@ -1403,23 +2262,66 @@ async function handleChat(req, res) {
 
     _chatRequestCount += 1;
     if (_chatRequestCount % MEMORY_MAINTENANCE_INTERVAL === 1) {
+      await rehashEmbeddingsIfNeeded();
+      await pruneMemorySummaries();
       await consolidateMemoryStore();
       await decayMemories();
-      await summarizeMemoryClusters();
+      await compressOldMemories();
     }
-    const memories = await loadAllMemories();
-    const relevantMemories = selectMemoriesWithFallback(memories, userContent, 2, {
-      maxPinned: 1,
-      maxAgeDays: 180,
-      referenceMaxAgeDays: 45,
-      minScore: 1,
-    });
-    await markMemoriesUsed(relevantMemories.map((m) => m.id));
-
+    let memories = await loadAllMemories();
     const invalidations = detectMemoryInvalidations(userContent, memories);
     if (invalidations.length > 0) {
       await markMemoriesInvalid(invalidations);
     }
+    const candidates = detectMemoryCandidates(userContent, memories, 3);
+    const createdMemories = [];
+    if (candidates.length > 0) {
+      for (const candidate of candidates) {
+        const created = await createMemory(
+          candidate.content,
+          candidate.tags,
+          { conversationId, messageTs: new Date().toISOString() },
+          { type: candidate.type, confidence: candidate.confidence, confirmed: false }
+        );
+        if (created?.saved) createdMemories.push(created);
+      }
+    }
+    if (invalidations.length > 0) {
+      const invalidationSet = new Set(invalidations);
+      const now = new Date().toISOString();
+      for (const mem of memories) {
+        if (invalidationSet.has(mem.id)) {
+          mem.confirmed = false;
+          mem.invalidatedAt = now;
+        }
+      }
+    }
+    if (createdMemories.length > 0) {
+      memories = memories.concat(createdMemories);
+    }
+
+    const recentContext = history
+      .filter((m) => m.role === "user")
+      .slice(-3)
+      .map((m) => m.content)
+      .join(" ");
+    const combinedQuery = [recentContext, userContent].filter(Boolean).join(" ");
+
+    const usableMemories = memories.filter(
+      (m) =>
+        !(Array.isArray(m?.tags) && m.tags.includes("summary")) &&
+        m?.source?.kind !== "auto_summary"
+    );
+    const isShortFollowUp = userContent.trim().length < 20 && history.length > 2;
+    const relevantMemories = isShortFollowUp
+      ? []
+      : selectMemoriesWithFallback(usableMemories, combinedQuery, 5, {
+          maxPinned: 2,
+          maxAgeDays: 180,
+          referenceMaxAgeDays: 45,
+          minScore: 1,
+        });
+    await markMemoriesUsed(relevantMemories.map((m) => m.id));
     const githubLine =
       config?.githubUsername && config?.githubToken
         ? `GitHub: ${config.githubUsername} (use github_repo)`
@@ -1430,6 +2332,8 @@ async function handleChat(req, res) {
           `root: ${config.workspaceRoot}`,
           `desktop: ${config.desktopDir || path.join(config.workspaceRoot, "Desktop")}`,
           githubLine,
+          `shell_access: ${config.unrestrictedShell ? "unrestricted" : "guarded"}`,
+          `web_search: ${config.webSearchEnabled ? "enabled" : "disabled"}`,
           "Use tools for file ops. Resolve relative paths from root.",
         ]
           .filter(Boolean)
@@ -1445,6 +2349,9 @@ async function handleChat(req, res) {
       memories: relevantMemories,
     });
 
+    const isWebLookup = Boolean(config.webSearchEnabled) && looksLikeWebLookupRequest(userContent);
+    const processTask = classifyProcessTask(userContent);
+
     const requiresTool = (() => {
       const text = userContent.toLowerCase();
       // Direct shell commands — always require a tool
@@ -1456,6 +2363,15 @@ async function handleChat(req, res) {
       if (/\b(?:delete|remove)\s+(?:the\s+)?(?:file|folder|directory)\b/.test(text)) return true;
       if (/\b(?:move|rename|copy)\s+(?:the\s+)?(?:file|folder|directory)\b/.test(text)) return true;
       if (/\b(?:run|execute)\s+(?:the\s+)?(?:command|script|bash|shell)\b/.test(text)) return true;
+      if (processTask) return true;
+      if (/\b(?:create|build|scaffold|set\s*up|initialize|init)\s+(?:a\s+)?(?:new\s+)?(?:project|app|application|website|site|repo|repository)\b/.test(text)) return true;
+      if (/\b(?:install|add|remove|uninstall)\s+\w/.test(text) && /\b(?:package|dependency|dep|lib|library|module|shadcn|tailwind|prisma|next|react|vue|express)\b/.test(text)) return true;
+      if (/\b(?:fix|update|change|modify|edit|refactor|debug)\s+(?:the\s+|my\s+|this\s+)?(?:code|bug|error|issue|style|styling|layout|page|component|function|api|route|config)\b/.test(text)) return true;
+      if (/\b(?:add|create|implement|build)\s+(?:a\s+|an\s+|the\s+)?(?:page|component|feature|form|button|modal|sidebar|navbar|header|footer|api|route|endpoint|test)\b/.test(text)) return true;
+      if (/\b(?:show|check|review)\s+(?:me\s+)?(?:the\s+)?(?:latest|recent|current)\s+(?:changes|status)\b/.test(text)) return true;
+      if (/\b(?:deploy|push|publish|upload|host)\b/.test(text)) return true;
+      if (/\bnpx?\s+\w/.test(text)) return true;
+      if (isWebLookup) return true;
       // Path-like patterns (e.g., "/home/user/file.txt", "~/Desktop", "./src")
       if (/(?:^|\s)[~.]?\/\w/.test(text)) return true;
       return false;
@@ -1480,19 +2396,27 @@ async function handleChat(req, res) {
         );
       return readish && !writeish;
     })();
+    const isPureWebLookup =
+      isWebLookup &&
+      !processTask &&
+      !isGitRequest &&
+      !/\b(?:file|folder|directory|desktop|home|terminal|shell|command|script|git|repo|repository|server|port)\b/.test(
+        userContent.toLowerCase()
+      );
 
-    const fallbackToolCall = async () => {
+    const fallbackToolCall = async (_message, _payload, options = {}) => {
       if (!requiresTool) return null;
       const text = userContent.toLowerCase();
       const home = config.homeDir || os.homedir();
       const desktop = config.desktopDir || path.join(home, "Desktop");
+      const phase = options?.phase || "execute";
 
       const wantsDesktop = text.includes("desktop");
       const listLike =
         text.includes("list") ||
-        text.includes("show") ||
         text.includes("what's in") ||
-        text.includes("whats in");
+        text.includes("whats in") ||
+        (text.includes("show") && /\b(?:folder|directory|desktop|home|files?)\b/.test(text));
       const readLike = text.includes("read") || text.includes("open");
       const makeDirLike =
         text.includes("mkdir") ||
@@ -1505,6 +2429,103 @@ async function handleChat(req, res) {
       const moveLike =
         text.includes("move") || text.includes("rename") || text.includes("mv ");
       const copyLike = text.includes("copy") || text.includes("cp ");
+      const repoStatusLike =
+        /\b(?:show|check|review)\s+(?:me\s+)?(?:the\s+)?(?:latest|recent|current)\s+(?:changes|status)\b/.test(text) ||
+        /\bgit\s+(?:status|diff|log)\b/.test(text);
+
+      if (isWebLookup) {
+        const urlMatch = userContent.match(/https?:\/\/[^\s)]+/i);
+        if (urlMatch) {
+          return {
+            name: "fetch_url",
+            arguments: {
+              url: urlMatch[0],
+              maxChars: 6000,
+            },
+          };
+        }
+        return {
+          name: "web_search",
+          arguments: {
+            query: buildWebSearchQuery(userContent),
+            limit: inferWebSearchLimit(userContent),
+            site: extractWebSearchSite(userContent) || undefined,
+          },
+        };
+      }
+
+      if (processTask) {
+        const cwd = inferProjectDirectory(userContent, config);
+        const { host, port, intent } = processTask;
+        const loopState = inspectToolLoopMessages(_payload?.messages || []);
+        if (phase === "verify" && intent !== "stop") {
+          return {
+            name: "verify_server",
+            arguments: {
+              host,
+              port,
+              path: "/",
+              timeoutMs: 15000,
+            },
+          };
+        }
+        if (phase === "verify_stopped" || intent === "stop") {
+          return {
+            name: "list_processes",
+            arguments: {
+              port,
+              limit: 10,
+            },
+          };
+        }
+        if (!loopState.hasUsed("list_processes")) {
+          return {
+            name: "list_processes",
+            arguments: {
+              port,
+              limit: 10,
+            },
+          };
+        }
+        const lastProcessScan = loopState.lastResult("list_processes");
+        if ((lastProcessScan?.count || 0) > 0 && !loopState.hasUsed("kill_process")) {
+          return {
+            name: "kill_process",
+            arguments: {
+              port,
+            },
+          };
+        }
+        if (intent === "stop") {
+          return {
+            name: "list_processes",
+            arguments: {
+              port,
+              limit: 10,
+            },
+          };
+        }
+        if (!loopState.hasUsed("start_dev_server")) {
+          return {
+            name: "start_dev_server",
+            arguments: {
+              cwd: cwd || desktop,
+              command: inferServerStartCommand(userContent),
+              host,
+              port,
+            },
+          };
+        }
+        return {
+          name: "verify_server",
+          arguments: {
+            host,
+            port,
+            path: "/",
+            timeoutMs: 15000,
+          },
+        };
+      }
 
       if (makeDirLike && wantsDesktop) {
         const match = userContent.match(/called\s+([^\n]+)$/i);
@@ -1517,21 +2538,30 @@ async function handleChat(req, res) {
 
       if (listLike && wantsDesktop) {
         return {
-          name: "run_command",
-          arguments: { command: `ls -a "${desktop}"` },
+          name: "list_dir",
+          arguments: { path: desktop },
         };
       }
 
       if (listLike) {
-        return { name: "run_command", arguments: { command: `ls -a "${home}"` } };
+        return { name: "list_dir", arguments: { path: home } };
       }
 
       if (readLike) {
         const fileMatch = userContent.match(/(?:read|open)\s+([\w./-]+)\b/i);
         if (fileMatch) {
           const target = fileMatch[1];
-          return { name: "run_command", arguments: { command: `cat "${target}"` } };
+          const fullPath = path.isAbsolute(target) ? target : path.join(home, target);
+          return { name: "read_file", arguments: { path: fullPath } };
         }
+      }
+
+      if (repoStatusLike) {
+        const workspaceRoot = config.workspaceRoot || process.cwd();
+        return {
+          name: "run_command",
+          arguments: { command: `git -C "${workspaceRoot}" status --short` },
+        };
       }
 
       if (deleteLike || moveLike || copyLike) {
@@ -1575,8 +2605,23 @@ async function handleChat(req, res) {
     }
 
     // Add tool definitions if available
-    const toolDefs = registry.getDefinitions();
-    if (toolDefs.length > 0) {
+    const allToolDefs = registry.getDefinitions();
+    const toolDefs = isPureWebLookup
+      ? allToolDefs.filter((tool) =>
+          ["web_search", "fetch_url"].includes(tool?.function?.name || "")
+        )
+      : allToolDefs;
+    const isConversational =
+      !requiresTool &&
+      !isWebLookup &&
+      !isGitRequest &&
+      !processTask &&
+      userContent.trim().length < 100 &&
+      !/\b(?:install|build|create|make|run|start|stop|deploy|fix|update|add|delete|remove|write|read|open|save)\b/i.test(
+        userContent
+      );
+
+    if (toolDefs.length > 0 && !isConversational) {
       payload.tools = toolDefs;
     }
     await logEvent("tools_available", {
@@ -1586,38 +2631,145 @@ async function handleChat(req, res) {
     });
 
     // Call LLM
+    let llmCallCount = 0;
     const callLLM = async (nextPayload) => {
-      const upstream = await fetchWithTimeout(config.endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(nextPayload),
-      });
-      if (!upstream.ok) {
-        const errorText = await upstream.text();
-        throw new Error(`LLM server error: ${upstream.status} ${errorText}`);
-      }
-      const data = await upstream.json();
-      await logEvent("llm_response", {
+      llmCallCount += 1;
+      updateChatProgress(
         conversationId,
-        response: JSON.stringify(data).slice(0, 8000),
-      });
-      return data;
+        "running",
+        `LLM call ${llmCallCount}: waiting for model`
+      );
+      try {
+        const upstream = await fetchWithTimeout(
+          config.endpoint,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(nextPayload),
+          },
+          120_000
+        );
+        if (!upstream.ok) {
+          const errorText = await upstream.text();
+          throw new Error(`LLM server error: ${upstream.status} ${errorText}`);
+        }
+        const data = await upstream.json();
+        await logEvent("llm_response", {
+          conversationId,
+          response: JSON.stringify(data).slice(0, 8000),
+        });
+        updateChatProgress(
+          conversationId,
+          "running",
+          `LLM call ${llmCallCount}: response received`
+        );
+        return data;
+      } catch (error) {
+        updateChatProgress(
+          conversationId,
+          "running",
+          `LLM call ${llmCallCount}: failed (${error instanceof Error ? error.message : "unknown error"})`
+        );
+        throw error;
+      }
     };
 
+    const systemNotes = [];
     if (requiresTool) {
-      payload.messages.push({
-        role: "user",
-        content:
-          "[System note] For tool tasks: 1) make a brief plan (1-3 bullets), 2) use tools, 3) verify with a tool before final response.",
-      });
+      systemNotes.push(
+        "Execute using tools now. Do not describe what you would do - do it. " +
+        "Use the 3-layer workflow: 1) understand, 2) execute with tools, 3) verify with tools. " +
+        "Do not claim success without tool verification."
+      );
+    }
+    if (requiresTool && processTask) {
+      systemNotes.push(
+        processTask.intent === "stop"
+          ? "This is a process-stop task. Use list_processes and kill_process. Verify port is free before responding."
+          : "This is a server task. Use start_dev_server and verify_server. A PID alone is not enough."
+      );
+    }
+    if (isWebLookup) {
+      systemNotes.push(
+        "Use web_search immediately with a small result set. For simple lookup questions, one quick search is usually enough. Only use fetch_url when the snippets are insufficient or a URL was provided. Do not use local shell or filesystem tools for a pure web lookup."
+      );
     }
     if (requiresTool && isGitRequest) {
+      systemNotes.push("Use github_repo and run_command for git operations. Verify with git ls-remote.");
+    }
+    if (systemNotes.length > 0) {
       payload.messages.push({
         role: "user",
-        content:
-          "[System note] For git/GitHub: use github_repo to create/verify, run git commands via run_command, and verify with github_repo verify or git ls-remote before final response.",
+        content: `[System note] ${systemNotes.join(" ")}`,
       });
     }
+
+    const configuredMaxRounds =
+      typeof config.maxToolRounds === "number"
+        ? config.maxToolRounds
+        : DEFAULT_CONFIG.maxToolRounds;
+    const effectiveMaxRounds = requiresTool
+      ? Math.min(configuredMaxRounds, isGitRequest ? 15 : isReadOnlyFsRequest ? 5 : 10)
+      : 8;
+    const maxToolRounds = isPureWebLookup
+      ? Math.min(effectiveMaxRounds, 3)
+      : effectiveMaxRounds;
+    const completionGuard = buildServerCompletionGuard(userContent);
+    const buildVerifyPrompt = isPureWebLookup
+      ? ({ hasErrors, toolCalls, defaultPrompt }) => {
+          if (hasErrors) return defaultPrompt;
+          const toolNames = (Array.isArray(toolCalls) ? toolCalls : [])
+            .map((toolCall) => toolCall?.function?.name)
+            .filter(Boolean);
+          if (toolNames.includes("fetch_url")) {
+            return "[System note] Use the fetched page text to answer the user now. Only fetch another page if this page is clearly insufficient.";
+          }
+          if (toolNames.includes("web_search")) {
+            return "[System note] Use these search results to answer the user now. Only call fetch_url if one result needs more detail.";
+          }
+          return defaultPrompt;
+        }
+      : null;
+    const toolCallGuard = isPureWebLookup
+      ? ({ payload: nextPayload, message }) => {
+          const requestedToolNames = (Array.isArray(message?.tool_calls) ? message.tool_calls : [])
+            .map((toolCall) => toolCall?.function?.name)
+            .filter(Boolean);
+          if (requestedToolNames.length === 0) return null;
+
+          const loopState = inspectToolLoopMessages(nextPayload?.messages || []);
+          const usedNames = Array.isArray(loopState?.usedNames) ? loopState.usedNames : [];
+          const webSearchCount = usedNames.filter((name) => name === "web_search").length;
+          const fetchUrlCount = usedNames.filter((name) => name === "fetch_url").length;
+
+          if (webSearchCount >= 1 && requestedToolNames.every((name) => name === "web_search")) {
+            return {
+              block: true,
+              note:
+                "[System note] You already searched the web for this request. Do not search again. Answer from the existing search results, or call fetch_url for one result only if more detail is required.",
+            };
+          }
+          if (fetchUrlCount >= 1 && requestedToolNames.includes("fetch_url")) {
+            return {
+              block: true,
+              note:
+                "[System note] You already fetched a page for this quick web lookup. Do not fetch more pages. Answer now using the information you already have.",
+            };
+          }
+          if (
+            webSearchCount >= 1 &&
+            fetchUrlCount >= 1 &&
+            requestedToolNames.every((name) => name === "web_search" || name === "fetch_url")
+          ) {
+            return {
+              block: true,
+              note:
+                "[System note] You already have enough web information for a quick lookup. Stop calling tools and answer the user now.",
+            };
+          }
+          return null;
+        }
+      : null;
 
     const { assistantContent } = await runToolLoop({
       payload,
@@ -1628,8 +2780,23 @@ async function handleChat(req, res) {
           messageTs: new Date().toISOString(),
         };
         await logEvent("tool_call", { conversationId, name, args });
+        updateChatProgress(
+          conversationId,
+          "running",
+          describeToolProgress(name, args, null, "running")
+        );
         const result = await registry.execute(name, args);
         await logEvent("tool_result", { conversationId, name, result });
+        const toolError =
+          result?.error ||
+          (result?.exitCode !== undefined && result?.exitCode !== 0);
+        updateChatProgress(
+          conversationId,
+          "running",
+          toolError
+            ? describeToolProgress(name, args, result, "error")
+            : describeToolProgress(name, args, result, "done")
+        );
         return result;
       },
       toolSkillLoader: (name) => registry.getSkill(name),
@@ -1638,15 +2805,28 @@ async function handleChat(req, res) {
       requireToolCall: requiresTool,
       fallbackToolCall,
       directToolOutput: requiresTool && isReadOnlyFsRequest,
-      maxToolRounds:
-        typeof config.maxToolRounds === "number"
-          ? config.maxToolRounds
-          : DEFAULT_CONFIG.maxToolRounds,
+      maxToolRounds,
+      completionGuard,
+      buildVerifyPrompt,
+      toolCallGuard,
     });
     await logEvent("assistant_response", { conversationId, content: assistantContent });
+    updateChatProgress(conversationId, "running", "Assistant response ready");
 
     // Save assistant response to conversation
     await appendToConversation(conversationId, "assistant", assistantContent);
+
+    const assistantFacts = detectAssistantFacts(assistantContent, memories, 2);
+    if (assistantFacts.length > 0) {
+      for (const fact of assistantFacts) {
+        await createMemory(
+          fact.content,
+          fact.tags,
+          { conversationId, messageTs: new Date().toISOString() },
+          { type: fact.type, confidence: fact.confidence, confirmed: false }
+        );
+      }
+    }
 
     // Update manifest metadata
     const manifest = await loadManifest();
@@ -1665,7 +2845,35 @@ async function handleChat(req, res) {
     }
 
     sendJson(res, 200, { content: assistantContent });
+    updateChatProgress(conversationId, "completed", "Response sent");
+
+    if (pendingSummary) {
+      summarizeConversationHistory(
+        pendingSummary.config,
+        pendingSummary.existingSummary,
+        pendingSummary.messages
+      )
+        .then(async (newSummary) => {
+          if (!newSummary) return;
+          const lastTs =
+            pendingSummary.messages[pendingSummary.messages.length - 1]?.ts ||
+            new Date().toISOString();
+          await saveConversationSummary(pendingSummary.conversationId, {
+            summary: newSummary,
+            updatedAt: new Date().toISOString(),
+            uptoTs: lastTs,
+          });
+        })
+        .catch(() => {});
+    }
   } catch (error) {
+    if (activeConversationId) {
+      updateChatProgress(
+        activeConversationId,
+        "failed",
+        `Request failed: ${error instanceof Error ? error.message : "Unknown error"}`
+      );
+    }
     if (handleBodyErrors(res, error)) return;
     await logEvent("chat_error", {
       error: error instanceof Error ? error.message : "Unknown error",
@@ -1718,6 +2926,11 @@ async function handleDeleteConversation(_req, res, id) {
   sendJson(res, 200, { deleted: id });
 }
 
+async function handleDeleteAllConversations(_req, res) {
+  await deleteAllConversations();
+  sendJson(res, 200, { deleted: "all" });
+}
+
 async function handleUpdateConversation(req, res, id) {
   try {
     const body = await readJsonBody(req);
@@ -1750,7 +2963,7 @@ async function handleListMemories(_req, res, url) {
   sendJson(res, 200, { memories: results.slice(-limit) });
 }
 
-function buildMemoryGraph(memories, maxNodes = 5000) {
+function buildMemoryGraph(memories, maxNodes = 5000, includeLinks = true) {
   const allowedTypes = new Set([
     "identity",
     "preference",
@@ -1788,6 +3001,10 @@ function buildMemoryGraph(memories, maxNodes = 5000) {
       lastUsed: m.lastUsed || null,
     };
   });
+
+  if (!includeLinks) {
+    return { nodes, links: [] };
+  }
 
   const keyForEmbedding = (embedding) => {
     if (!Array.isArray(embedding) || embedding.length === 0) return "0";
@@ -1869,6 +3086,11 @@ async function handleDeleteMemoryRoute(_req, res, id) {
   sendJson(res, 200, { deleted: id });
 }
 
+async function handleDeleteAllMemories(_req, res) {
+  await deleteAllMemories();
+  sendJson(res, 200, { deleted: "all" });
+}
+
 async function handleUpdateMemoryRoute(req, res, id) {
   try {
     const body = await readJsonBody(req);
@@ -1887,8 +3109,9 @@ async function handleUpdateMemoryRoute(req, res, id) {
 async function handleMemoryGraph(_req, res, url) {
   const limit = Number.parseInt(url.searchParams.get("limit") || "2000", 10);
   const memories = await loadAllMemories();
-  const graph = buildMemoryGraph(memories, limit);
-  sendJson(res, 200, graph);
+  const includeLinks = url.searchParams.get("links") !== "0";
+  const graph = buildMemoryGraph(memories, limit, includeLinks);
+  sendJson(res, 200, { ...graph, total: memories.length });
 }
 
 async function handleMemorySummary(req, res) {
@@ -1957,6 +3180,25 @@ async function handleStatus(_req, res) {
   });
 }
 
+async function handleChatStatus(_req, res, url) {
+  const conversationId = String(url.searchParams.get("conversationId") || "").trim();
+  if (!conversationId) {
+    return sendJson(res, 400, { error: "conversationId is required" });
+  }
+  trimChatProgressStore();
+  const state = chatProgressByConversation.get(conversationId);
+  if (!state) {
+    return sendJson(res, 200, {
+      conversationId,
+      status: "idle",
+      startedAt: null,
+      updatedAt: null,
+      steps: [],
+    });
+  }
+  return sendJson(res, 200, state);
+}
+
 async function handleGetConfig(_req, res) {
   sendJson(res, 200, await loadAgentConfigForUi());
 }
@@ -2002,6 +3244,10 @@ async function main() {
       void handleStatus(req, res);
       return;
     }
+    if (req.method === "GET" && url.pathname === "/chat/status") {
+      void handleChatStatus(req, res, url);
+      return;
+    }
 
     // Config
     if (req.method === "GET" && url.pathname === "/config") {
@@ -2031,6 +3277,10 @@ async function main() {
       void handleCreateConversation(req, res);
       return;
     }
+    if (req.method === "DELETE" && url.pathname === "/conversations") {
+      void handleDeleteAllConversations(req, res);
+      return;
+    }
     if (req.method === "GET" && parts[0] === "conversations" && parts[1]) {
       void handleGetConversation(req, res, parts[1], url);
       return;
@@ -2051,6 +3301,10 @@ async function main() {
     }
     if (req.method === "POST" && url.pathname === "/memories") {
       void handleCreateMemoryRoute(req, res);
+      return;
+    }
+    if (req.method === "DELETE" && url.pathname === "/memories") {
+      void handleDeleteAllMemories(req, res);
       return;
     }
     if (req.method === "DELETE" && parts[0] === "memories" && parts[1]) {

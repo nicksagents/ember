@@ -375,6 +375,42 @@ export function SettingsForm() {
             Chat memory is now persisted by the Ember runtime, shared across all
             devices connected to this agent instance.
           </p>
+
+          <label className="flex cursor-pointer items-start gap-3">
+            <input
+              type="checkbox"
+              checked={config.unrestrictedShell}
+              onChange={(e) =>
+                setConfig({ ...config, unrestrictedShell: e.target.checked })
+              }
+              className="mt-0.5 h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-blue-500"
+            />
+            <span className="text-sm text-zinc-300">
+              Allow unrestricted terminal commands
+              <span className="block text-xs text-zinc-500">
+                Removes command guardrails from `run_command` so the local agent
+                can execute any bash command available on this machine.
+              </span>
+            </span>
+          </label>
+
+          <label className="flex cursor-pointer items-start gap-3">
+            <input
+              type="checkbox"
+              checked={config.webSearchEnabled}
+              onChange={(e) =>
+                setConfig({ ...config, webSearchEnabled: e.target.checked })
+              }
+              className="mt-0.5 h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-blue-500"
+            />
+            <span className="text-sm text-zinc-300">
+              Enable web search tools
+              <span className="block text-xs text-zinc-500">
+                Lets the agent search the web and fetch page text for current
+                information when local knowledge is not enough.
+              </span>
+            </span>
+          </label>
         </div>
       </section>
 

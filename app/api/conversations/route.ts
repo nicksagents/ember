@@ -30,3 +30,17 @@ export async function POST(req: NextRequest) {
     );
   }
 }
+
+export async function DELETE() {
+  try {
+    const response = await fetch(`${AGENT_URL}/conversations`, {
+      method: "DELETE",
+    });
+    return NextResponse.json(await response.json(), { status: response.status });
+  } catch (error) {
+    return NextResponse.json(
+      { error: "Failed to delete conversations", details: error instanceof Error ? error.message : "Unknown error" },
+      { status: 502 }
+    );
+  }
+}

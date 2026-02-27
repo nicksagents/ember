@@ -6,7 +6,10 @@ export async function GET(request: Request) {
   try {
     const url = new URL(request.url);
     const limit = url.searchParams.get("limit") || "2000";
-    const response = await fetch(`${AGENT_URL}/memories/graph?limit=${limit}`);
+    const links = url.searchParams.get("links") || "1";
+    const response = await fetch(
+      `${AGENT_URL}/memories/graph?limit=${limit}&links=${links}`
+    );
     return NextResponse.json(await response.json(), { status: response.status });
   } catch (error) {
     return NextResponse.json(

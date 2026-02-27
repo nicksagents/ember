@@ -69,6 +69,21 @@ export default function Home() {
     [activeId]
   );
 
+  const handleDeleteAll = useCallback(async () => {
+    if (conversations.length === 0) return;
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm("Delete all conversations? This cannot be undone.")
+    ) {
+      return;
+    }
+    try {
+      await fetch("/api/conversations", { method: "DELETE" });
+      setConversations([]);
+      setActiveId(null);
+    } catch {}
+  }, [conversations.length]);
+
   const handleSelect = useCallback(async (id: string) => {
     setActiveId(id);
     fetch(`/api/conversations/${id}`, {
@@ -108,6 +123,7 @@ export default function Home() {
         onSelect={handleSelect}
         onNew={handleNew}
         onDelete={handleDelete}
+        onDeleteAll={handleDeleteAll}
         isOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
       />

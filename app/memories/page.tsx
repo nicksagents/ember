@@ -23,6 +23,7 @@ type MemoryLink = { source: string; target: string; weight: number };
 type MemoryGraphData = {
   nodes: MemoryNode[];
   links: MemoryLink[];
+  total?: number;
 };
 
 const TYPE_OPTIONS = ["identity", "preference", "workflow", "project", "reference"];
@@ -34,11 +35,17 @@ export default function MemoriesPage() {
   const [draft, setDraft] = useState<MemoryNode | null>(null);
   const [tagInput, setTagInput] = useState("");
   const [summaryBusy, setSummaryBusy] = useState(false);
+  const [nodeLimit, setNodeLimit] = useState(800);
+  const [liteMode, setLiteMode] = useState(true);
 
   const fetchGraph = async () => {
     setLoading(true);
     try {
-      const res = await fetch("/api/memories/graph?limit=5000");
+      const params = new URLSearchParams({
+        limit: String(nodeLimit),
+        links: liteMode ? "0" : "1",
+      });
+      const res = await fetch(`/api/memories/graph?${params}`);
       const data = await res.json();
       if (res.ok) {
         setGraph(data);
@@ -50,7 +57,7 @@ export default function MemoriesPage() {
 
   useEffect(() => {
     void fetchGraph();
-  }, []);
+  }, [liteMode, nodeLimit]);
 
   useEffect(() => {
     setDraft(selected ? { ...selected } : null);
@@ -61,7 +68,7 @@ export default function MemoriesPage() {
     const total = graph.nodes.length;
     const pinned = graph.nodes.filter((n) => n.tags.includes("pin")).length;
     const confirmed = graph.nodes.filter((n) => n.confirmed).length;
-    return { total, pinned, confirmed };
+    return { total, pinned, confirmed, all: graph.total ?? total };
   }, [graph.nodes]);
 
   const connections = useMemo(() => {
@@ -100,6 +107,21 @@ export default function MemoriesPage() {
   const handleDelete = async () => {
     if (!selected) return;
     const res = await fetch(`/api/memories/${selected.id}`, { method: "DELETE" });
+    if (res.ok) {
+      setSelected(null);
+      await fetchGraph();
+    }
+  };
+
+  const handleDeleteAll = async () => {
+    if (graph.nodes.length === 0) return;
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm("Delete all memories? This cannot be undone.")
+    ) {
+      return;
+    }
+    const res = await fetch("/api/memories", { method: "DELETE" });
     if (res.ok) {
       setSelected(null);
       await fetchGraph();
@@ -152,7 +174,10 @@ export default function MemoriesPage() {
               Memory System
             </div>
             <div className="mt-2 flex gap-4 text-[10px] sm:text-xs">
-              <span>Total: {stats.total}</span>
+              <span>
+                Showing: {stats.total}
+                {stats.all > stats.total ? ` of ${stats.all}` : ""}
+              </span>
               <span>Pinned: {stats.pinned}</span>
               <span>Confirmed: {stats.confirmed}</span>
             </div>
@@ -178,6 +203,24 @@ export default function MemoriesPage() {
             </div>
           </div>
           <div className="pointer-events-auto flex items-center gap-2">
+            <select
+              value={String(nodeLimit)}
+              onChange={(e) => setNodeLimit(Number.parseInt(e.target.value, 10))}
+              className="h-9 rounded-md border border-white/10 bg-white/5 px-2 text-xs text-white"
+            >
+              <option value="300">300 nodes</option>
+              <option value="800">800 nodes</option>
+              <option value="1500">1500 nodes</option>
+              <option value="3000">3000 nodes</option>
+              <option value="5000">5000 nodes</option>
+            </select>
+            <Button
+              variant="outline"
+              className="border-white/10 bg-white/5 text-white hover:bg-white/10"
+              onClick={() => setLiteMode((prev) => !prev)}
+            >
+              {liteMode ? "Links off" : "Links on"}
+            </Button>
             <Button
               variant="outline"
               className="border-white/10 bg-white/5 text-white hover:bg-white/10"
@@ -185,6 +228,14 @@ export default function MemoriesPage() {
               disabled={loading}
             >
               {loading ? "Refreshing..." : "Refresh"}
+            </Button>
+            <Button
+              variant="outline"
+              className="border-red-400/40 text-red-200 hover:bg-red-500/20"
+              onClick={() => void handleDeleteAll()}
+              disabled={graph.nodes.length === 0}
+            >
+              Clear all
             </Button>
           </div>
         </div>

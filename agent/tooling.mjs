@@ -73,6 +73,203 @@ function normalizePathInput(value, policy) {
   return text;
 }
 
+function normalizeServerCommand(command) {
+  let nextCommand = String(command || "").trim();
+  const lower = nextCommand.toLowerCase();
+  const isServerStart =
+    lower.includes("npm run dev") ||
+    lower.includes("npm run start") ||
+    lower.includes("pnpm dev") ||
+    lower.includes("pnpm start") ||
+    lower.includes("yarn dev") ||
+    lower.includes("yarn start") ||
+    lower.includes("next dev");
+  if (!isServerStart) {
+    return { command: nextCommand, isServerStart: false };
+  }
+
+  if (!/(\bhost\b|--hostname|-H)\s+/.test(nextCommand) && !/\bHOST=/.test(nextCommand)) {
+    if (/\bnext dev\b/.test(lower)) {
+      nextCommand += " --hostname 0.0.0.0";
+    } else {
+      nextCommand += " -- --hostname 0.0.0.0";
+    }
+  }
+  if (!/(\bport\b|--port|-p)\s+/.test(nextCommand) && !/\bPORT=/.test(nextCommand)) {
+    if (/\bnext dev\b/.test(lower)) {
+      nextCommand += " --port 3000";
+    } else {
+      nextCommand += " -- --port 3000";
+    }
+  }
+
+  nextCommand = nextCommand.replace(/\bHOST=127\.0\.0\.1\b/g, "HOST=0.0.0.0");
+  nextCommand = nextCommand.replace(/\bHOST=localhost\b/g, "HOST=0.0.0.0");
+  nextCommand = nextCommand.replace(/--hostname\s+127\.0\.0\.1/g, "--hostname 0.0.0.0");
+  nextCommand = nextCommand.replace(/--hostname\s+localhost/g, "--hostname 0.0.0.0");
+
+  return { command: nextCommand, isServerStart: true };
+}
+
+async function runSpawnCapture(bin, args = [], options = {}) {
+  return await new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let resolved = false;
+    const resolveOnce = (result) => {
+      if (resolved) return;
+      resolved = true;
+      resolve(result);
+    };
+    let child;
+    try {
+      child = spawn(bin, args, {
+        cwd: options.cwd || process.cwd(),
+        env: { ...process.env, ...(options.env || {}) },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (error) {
+      resolveOnce({
+        ok: false,
+        exitCode: null,
+        stdout: "",
+        stderr: error instanceof Error ? error.message : "spawn failed",
+      });
+      return;
+    }
+
+    const timeoutMs = clampNumber(options.timeoutMs, 500, 120000, 10000);
+    const timer = setTimeout(() => {
+      try {
+        child.kill("SIGTERM");
+      } catch {}
+    }, timeoutMs);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      resolveOnce({
+        ok: false,
+        exitCode: null,
+        stdout,
+        stderr: `${stderr}${error instanceof Error ? error.message : "spawn failed"}`,
+      });
+    });
+    child.on("exit", (code) => {
+      clearTimeout(timer);
+      resolveOnce({
+        ok: code === 0,
+        exitCode: code,
+        stdout,
+        stderr,
+      });
+    });
+  });
+}
+
+function uniqueNumbers(values) {
+  return Array.from(
+    new Set(
+      values
+        .map((value) => Number.parseInt(String(value || "").trim(), 10))
+        .filter((value) => Number.isFinite(value) && value > 0)
+    )
+  );
+}
+
+async function findListeningPids(port) {
+  const safePort = clampNumber(Number(port), 1, 65535, 0);
+  if (!safePort) return [];
+
+  const lsof = await runSpawnCapture("lsof", ["-tiTCP:" + safePort, "-sTCP:LISTEN"]);
+  let pids = uniqueNumbers(lsof.stdout.split(/\s+/));
+  if (pids.length > 0) return pids;
+
+  const fuser = await runSpawnCapture("fuser", [`${safePort}/tcp`]);
+  pids = uniqueNumbers(`${fuser.stdout} ${fuser.stderr}`.split(/\s+/));
+  if (pids.length > 0) return pids;
+
+  const ss = await runSpawnCapture("ss", ["-ltnp", `( sport = :${safePort} )`]);
+  const matches = Array.from(
+    `${ss.stdout}\n${ss.stderr}`.matchAll(/pid=(\d+)/g),
+    (match) => match[1]
+  );
+  return uniqueNumbers(matches);
+}
+
+async function describeProcess(pid) {
+  const result = await runSpawnCapture("ps", ["-p", String(pid), "-o", "pid=,ppid=,stat=,etime=,command="]);
+  const line = result.stdout.trim().split("\n").filter(Boolean)[0] || "";
+  if (!line) {
+    return { pid, ppid: null, stat: "", etime: "", command: "" };
+  }
+  const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s+([\s\S]+)$/);
+  if (!match) {
+    return { pid, ppid: null, stat: "", etime: "", command: line.trim() };
+  }
+  return {
+    pid: Number.parseInt(match[1], 10),
+    ppid: Number.parseInt(match[2], 10),
+    stat: match[3],
+    etime: match[4],
+    command: match[5].trim(),
+  };
+}
+
+async function listProcesses({ match = "", port = null, limit = 20 } = {}) {
+  let rows = [];
+  if (port) {
+    const pids = await findListeningPids(port);
+    rows = await Promise.all(pids.map((pid) => describeProcess(pid)));
+  } else {
+    const result = await runSpawnCapture("ps", ["-eo", "pid=,ppid=,stat=,etime=,command="], {
+      timeoutMs: 10000,
+    });
+    rows = result.stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const parsed = line.match(/^(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s+([\s\S]+)$/);
+        if (!parsed) return null;
+        return {
+          pid: Number.parseInt(parsed[1], 10),
+          ppid: Number.parseInt(parsed[2], 10),
+          stat: parsed[3],
+          etime: parsed[4],
+          command: parsed[5].trim(),
+        };
+      })
+      .filter(Boolean);
+  }
+
+  const matchText = String(match || "").trim().toLowerCase();
+  if (matchText) {
+    rows = rows.filter((row) => row.command.toLowerCase().includes(matchText));
+  }
+  return rows.slice(0, clampNumber(Number(limit), 1, 200, 20));
+}
+
+async function killPidOrGroup(pid, signal = "SIGTERM") {
+  try {
+    if (process.platform !== "win32") {
+      process.kill(-pid, signal);
+      return true;
+    }
+  } catch {}
+  try {
+    process.kill(pid, signal);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function isUnderPath(candidate, root) {
   if (!candidate || !root) return false;
   const rel = path.relative(root, candidate);
@@ -91,6 +288,7 @@ export function createFsPolicy({
   emberRoots = [],
   allowWriteToEmber = false,
   blockEmberByName = true,
+  unrestrictedShell = false,
   workspaceRoot = "",
   desktopDir = "",
   protectedPathsWrite = [],
@@ -137,6 +335,7 @@ export function createFsPolicy({
     homeDir: resolvedHome,
     emberRoots: resolvedEmberRoots,
     allowWriteToEmber,
+    unrestrictedShell: Boolean(unrestrictedShell),
     workspaceRoot: resolvedWorkspaceRoot,
     desktopDir: resolvedDesktopDir,
     protectedPathsWrite: resolvedProtectedWrite,
@@ -197,6 +396,7 @@ function looksLikeWriteCommand(command) {
 
 function guardCommand(policy, command) {
   if (!policy || !command) return null;
+  if (policy.unrestrictedShell === true) return null;
   const lower = String(command).toLowerCase();
   if (!looksLikeWriteCommand(lower)) return null;
   const roots = [
@@ -381,6 +581,179 @@ export async function loadToolPlugins(registry, pluginDirs = []) {
 }
 
 export function registerFilesystemTools(registry, { policy } = {}) {
+  registry.register({
+    name: "list_processes",
+    description: "List running processes. Filter by port or a command substring when managing local apps and dev servers.",
+    parameters: {
+      type: "object",
+      properties: {
+        port: { type: "number", description: "Listening TCP port to inspect" },
+        match: { type: "string", description: "Case-insensitive substring to match in the command" },
+        limit: { type: "number", description: "Maximum processes to return" },
+      },
+      required: [],
+    },
+    keywords: ["process", "ps", "port", "running", "server"],
+    handler: async (args) => {
+      const port = Number.isFinite(args?.port) ? args.port : null;
+      const processes = await listProcesses({
+        port,
+        match: args?.match,
+        limit: args?.limit,
+      });
+      return { processes, count: processes.length, port: port || null, match: args?.match || "" };
+    },
+  });
+
+  registry.register({
+    name: "kill_process",
+    description: "Stop a running process by pid or by listening port. Use this before restarting a local app or clearing stale dev servers.",
+    parameters: {
+      type: "object",
+      properties: {
+        pid: { type: "number", description: "Process id to stop" },
+        port: { type: "number", description: "Kill the process listening on this TCP port" },
+        force: { type: "boolean", description: "Use SIGKILL instead of SIGTERM" },
+      },
+      required: [],
+    },
+    keywords: ["kill", "stop", "terminate", "port", "process"],
+    handler: async (args) => {
+      const pids = [];
+      if (Number.isFinite(args?.pid)) {
+        pids.push(Number(args.pid));
+      }
+      if (Number.isFinite(args?.port)) {
+        pids.push(...(await findListeningPids(args.port)));
+      }
+      const uniquePids = uniqueNumbers(pids);
+      if (uniquePids.length === 0) {
+        return { killed: false, reason: "No matching process found", pid: args?.pid || null, port: args?.port || null };
+      }
+      const signal = args?.force ? "SIGKILL" : "SIGTERM";
+      const results = [];
+      for (const pid of uniquePids) {
+        const ok = await killPidOrGroup(pid, signal);
+        results.push({ pid, signal, ok });
+      }
+      return {
+        killed: results.some((item) => item.ok),
+        signal,
+        targets: results,
+        port: Number.isFinite(args?.port) ? args.port : null,
+      };
+    },
+  });
+
+  registry.register({
+    name: "start_dev_server",
+    description: "Start a local development server in the background with a target host and port. Use this instead of raw shell for npm/pnpm/yarn dev servers.",
+    parameters: {
+      type: "object",
+      properties: {
+        cwd: { type: "string", description: "Project directory" },
+        command: { type: "string", description: "Dev server command (default: npm run dev)" },
+        host: { type: "string", description: "Host to bind (default: 0.0.0.0)" },
+        port: { type: "number", description: "Port to bind (default: 3000)" },
+        env: {
+          type: "object",
+          additionalProperties: { type: "string" },
+          description: "Additional environment variables",
+        },
+      },
+      required: ["cwd"],
+    },
+    keywords: ["start", "server", "dev", "host", "port", "next"],
+    handler: async (args) => {
+      const cwd = normalizePathInput(args.cwd, policy);
+      const host = String(args.host || "0.0.0.0").trim() || "0.0.0.0";
+      const port = clampNumber(Number(args.port), 1, 65535, 3000);
+      const baseCommand = String(args.command || "npm run dev").trim() || "npm run dev";
+      const normalized = normalizeServerCommand(`HOST=${host} PORT=${port} ${baseCommand}`);
+      try {
+        const child = spawn("/bin/bash", ["-lc", normalized.command], {
+          cwd,
+          env: { ...process.env, HOST: host, PORT: String(port), ...(args.env || {}) },
+          stdio: "ignore",
+          detached: true,
+        });
+        child.unref();
+        return {
+          started: true,
+          pid: child.pid || null,
+          cwd,
+          host,
+          port,
+          command: normalized.command,
+        };
+      } catch (error) {
+        return {
+          started: false,
+          cwd,
+          host,
+          port,
+          command: normalized.command,
+          error: error instanceof Error ? error.message : "Failed to start dev server",
+        };
+      }
+    },
+  });
+
+  registry.register({
+    name: "verify_server",
+    description: "Verify that a local server is listening and responding on a host and port. Use after starting or restarting a project server.",
+    parameters: {
+      type: "object",
+      properties: {
+        host: { type: "string", description: "Host to probe (0.0.0.0 will be probed via 127.0.0.1)" },
+        port: { type: "number", description: "Port to probe" },
+        path: { type: "string", description: "HTTP path to request" },
+        timeoutMs: { type: "number", description: "Request timeout in milliseconds" },
+      },
+      required: ["port"],
+    },
+    keywords: ["verify", "server", "http", "port", "listen", "health"],
+    handler: async (args) => {
+      const host = String(args.host || "127.0.0.1").trim() || "127.0.0.1";
+      const port = clampNumber(Number(args.port), 1, 65535, 3000);
+      const pathName = String(args.path || "/").trim() || "/";
+      const probeHost = host === "0.0.0.0" ? "127.0.0.1" : host;
+      const listeningPids = await findListeningPids(port);
+      const timeoutMs = clampNumber(Number(args.timeoutMs), 500, 30000, 5000);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(`http://${probeHost}:${port}${pathName}`, {
+          method: "GET",
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
+        return {
+          ok: response.status < 500,
+          host,
+          probeHost,
+          port,
+          path: pathName,
+          status: response.status,
+          listening: listeningPids.length > 0,
+          pids: listeningPids,
+        };
+      } catch (error) {
+        clearTimeout(timer);
+        return {
+          ok: false,
+          host,
+          probeHost,
+          port,
+          path: pathName,
+          listening: listeningPids.length > 0,
+          pids: listeningPids,
+          error: error instanceof Error ? error.message : "Server verification failed",
+        };
+      }
+    },
+  });
+
   registry.register({
     name: "list_dir",
     description: "List files and folders in a directory. Set recursive=true to walk subdirectories (max depth 10). Set includeHidden=true for dotfiles.",
@@ -574,13 +947,17 @@ export function registerFilesystemTools(registry, { policy } = {}) {
 
   registry.register({
     name: "run_command",
-    description: "Run a bash shell command and return stdout/stderr. Default timeout 30s, max 300s via timeoutMs. Set cwd for working directory.",
+    description: "Run a bash shell command and return stdout/stderr. Default timeout 30s, max 300s via timeoutMs. Set cwd for working directory. Use background=true for long-running processes.",
     parameters: {
       type: "object",
       properties: {
         command: { type: "string", description: "Command string" },
         cwd: { type: "string", description: "Working directory" },
         timeoutMs: { type: "number", description: "Timeout in milliseconds" },
+        background: {
+          type: "boolean",
+          description: "Run in detached background mode and return immediately",
+        },
         env: {
           type: "object",
           additionalProperties: { type: "string" },
@@ -613,36 +990,114 @@ export function registerFilesystemTools(registry, { policy } = {}) {
       // Also normalize ~ to home directory for unquoted paths
       command = command.replace(/(^|\s)~\//g, `$1${homeDir}/`);
 
+      const normalizedServer = normalizeServerCommand(command);
+      command = normalizedServer.command;
+
       const violation = guardCommand(policy, command);
       if (violation) return violation;
 
       const timeoutMs = clampNumber(args.timeoutMs, 1000, 300000, 30000);
+      const cwd = args.cwd || policy?.workspaceRoot || process.cwd();
+      const env = { ...process.env, ...(args.env || {}) };
+      const isBackground = args.background === true || normalizedServer.isServerStart;
+
+      if (isBackground) {
+        try {
+          const child = spawn("/bin/bash", ["-lc", command], {
+            cwd,
+            env,
+            stdio: "ignore",
+            detached: true,
+          });
+          child.unref();
+          return {
+            command,
+            cwd,
+            background: true,
+            autoBackground: args.background !== true && normalizedServer.isServerStart,
+            started: true,
+            pid: child.pid || null,
+          };
+        } catch (error) {
+          return {
+            command,
+            background: true,
+            started: false,
+            error: error instanceof Error ? error.message : "Failed to start background command",
+          };
+        }
+      }
+
       return await new Promise((resolve) => {
+        let resolved = false;
+        let timedOut = false;
+        const resolveOnce = (result) => {
+          if (resolved) return;
+          resolved = true;
+          resolve(result);
+        };
+
         const child = spawn("/bin/bash", ["-lc", command], {
-          cwd: args.cwd || policy?.workspaceRoot || process.cwd(),
-          env: { ...process.env, ...(args.env || {}) },
+          cwd,
+          env,
           stdio: ["ignore", "pipe", "pipe"],
+          detached: true,
         });
 
         let stdout = "";
         let stderr = "";
+        const MAX_OUTPUT_CHARS = 120000;
+
+        const trimBuffered = (text) =>
+          text.length > MAX_OUTPUT_CHARS ? text.slice(-MAX_OUTPUT_CHARS) : text;
 
         const timer = setTimeout(() => {
-          child.kill("SIGTERM");
+          timedOut = true;
+          if (typeof child.pid === "number" && child.pid > 0 && process.platform !== "win32") {
+            try {
+              process.kill(-child.pid, "SIGTERM");
+            } catch {}
+            setTimeout(() => {
+              try {
+                process.kill(-child.pid, "SIGKILL");
+              } catch {}
+            }, 3000).unref();
+            return;
+          }
+          try {
+            child.kill("SIGTERM");
+          } catch {}
         }, timeoutMs);
 
         child.stdout.on("data", (chunk) => {
-          stdout += String(chunk);
+          stdout = trimBuffered(stdout + String(chunk));
         });
         child.stderr.on("data", (chunk) => {
-          stderr += String(chunk);
+          stderr = trimBuffered(stderr + String(chunk));
         });
-        child.on("close", (code, signal) => {
+        child.on("error", (error) => {
           clearTimeout(timer);
-          resolve({
+          resolveOnce({
             command,
+            cwd,
+            exitCode: null,
+            signal: null,
+            timedOut,
+            timeoutMs,
+            stdout,
+            stderr,
+            error: error instanceof Error ? error.message : "Command execution failed",
+          });
+        });
+        child.on("exit", (code, signal) => {
+          clearTimeout(timer);
+          resolveOnce({
+            command,
+            cwd,
             exitCode: code,
             signal: signal || null,
+            timedOut,
+            timeoutMs,
             stdout,
             stderr,
           });
