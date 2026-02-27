@@ -1,0 +1,6 @@
+{
+  "endpoint": "http://localhost:8080/v1/chat/completions",
+  "model": "",
+  "temperature": 0.7,
+  "statelessProvider": true
+}
