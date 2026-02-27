@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect } from "react";
-import { Plus, Trash2, MessageSquare, X } from "lucide-react";
+import Link from "next/link";
+import { useEffect, useState } from "react";
+import { Brain, MessageSquare, Plus, Search, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -32,6 +33,8 @@ export function Sidebar({
   isOpen,
   onClose,
 }: SidebarProps) {
+  const [query, setQuery] = useState("");
+
   // Lock body scroll when sidebar overlay is open on mobile
   useEffect(() => {
     if (!isOpen) return;
@@ -44,6 +47,10 @@ export function Sidebar({
   }, [isOpen]);
 
   if (!isOpen) return null;
+
+  const filteredConversations = conversations.filter((conv) =>
+    conv.title.toLowerCase().includes(query.trim().toLowerCase())
+  );
 
   const handleSelect = (id: string) => {
     onSelect(id);
@@ -62,52 +69,81 @@ export function Sidebar({
 
   return (
     <>
-      {/* Backdrop — mobile only */}
       <div
         className="fixed inset-0 z-40 bg-black/60 md:hidden"
         onClick={onClose}
         aria-hidden
       />
 
-      {/* Panel */}
       <div
         className={cn(
-          "flex h-full flex-col border-r border-zinc-800 bg-zinc-950",
-          // Mobile: full-screen overlay from left
-          "fixed inset-y-0 left-0 z-50 w-[280px] pt-safe",
-          // Desktop: static sidebar in flex layout
-          "md:relative md:z-auto md:w-64 md:shrink-0"
+          "fixed inset-y-0 left-0 z-50 flex h-full w-[320px] flex-col border-r border-white/8 bg-[linear-gradient(180deg,rgba(255,255,255,0.025),rgba(255,255,255,0.01))] pt-safe backdrop-blur",
+          "md:relative md:z-auto md:w-[320px] md:shrink-0"
         )}
       >
-        {/* Header */}
-        <div className="flex items-center gap-2 border-b border-zinc-800 p-3">
-          <Button
-            onClick={handleNew}
-            variant="outline"
-            className="flex-1 gap-2 border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
-          >
-            <Plus className="h-4 w-4" />
-            New chat
-          </Button>
-          {/* Close button — mobile only */}
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={onClose}
-            className="h-9 w-9 shrink-0 text-zinc-400 hover:text-zinc-100 md:hidden"
-          >
-            <X className="h-5 w-5" />
-          </Button>
+        <div className="flex items-start justify-between px-5 pb-5 pt-6">
+          <div>
+            <div className="ember-wordmark text-4xl font-semibold tracking-tight">
+              EMBER
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              onClick={handleNew}
+              variant="ghost"
+              size="icon"
+              className="h-11 w-11 rounded-full border border-white/10 bg-white/[0.03] text-zinc-200 hover:bg-white/[0.08] hover:text-white"
+            >
+              <Plus className="h-5 w-5" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={onClose}
+              className="h-11 w-11 rounded-full border border-white/10 bg-white/[0.03] text-zinc-300 hover:bg-white/[0.08] hover:text-white md:hidden"
+            >
+              <X className="h-5 w-5" />
+            </Button>
+          </div>
         </div>
 
-        {/* Conversation list */}
-        <div className="scrollbar-hide flex-1 overflow-y-auto pb-safe">
-          {conversations.length === 0 ? (
-            <div className="px-3 py-8 text-center text-xs text-zinc-600">
-              No conversations yet
+        <div className="px-5 pb-4">
+          <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
+            <Search className="h-4 w-4 shrink-0 text-zinc-600" />
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search conversations..."
+              autoComplete="off"
+              className="w-full bg-transparent text-sm text-zinc-200 placeholder:text-zinc-500 focus:outline-none"
+            />
+            {query ? (
+              <button
+                type="button"
+                onClick={() => setQuery("")}
+                className="rounded-full p-1 text-zinc-500 transition hover:bg-white/[0.06] hover:text-zinc-200"
+                aria-label="Clear search"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="px-5 pb-3 text-[11px] uppercase tracking-[0.3em] text-zinc-600">
+          {query ? "Search Results" : "Recent Conversations"}
+        </div>
+
+        <div className="scrollbar-hide flex-1 overflow-y-auto px-3 pb-safe">
+          {filteredConversations.length === 0 ? (
+            <div className="flex h-full min-h-[240px] flex-col items-center justify-center px-6 text-center">
+              <p className="text-sm text-zinc-400">
+                {query ? "No matching conversations" : "Start a new chat to begin"}
+              </p>
             </div>
           ) : (
-            conversations.map((conv) => (
+            filteredConversations.map((conv) => (
               <div
                 key={conv.id}
                 role="button"
@@ -117,28 +153,47 @@ export function Sidebar({
                   if (e.key === "Enter") handleSelect(conv.id);
                 }}
                 className={cn(
-                  // Min 44px height for iOS touch target
-                  "group flex min-h-[44px] items-center gap-2 px-3 py-3 text-sm transition-colors cursor-pointer active:bg-zinc-800",
+                  "group mb-1.5 flex min-h-[52px] items-center gap-3 rounded-2xl border px-3 py-3 text-sm transition-colors cursor-pointer",
                   activeId === conv.id
-                    ? "bg-zinc-800/60 text-zinc-100"
-                    : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-300"
+                    ? "border-orange-500/20 bg-white/[0.08] text-zinc-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
+                    : "border-transparent text-zinc-400 hover:border-white/6 hover:bg-white/[0.04] hover:text-zinc-200"
                 )}
               >
-                <MessageSquare className="h-4 w-4 shrink-0 text-zinc-500" />
-                <span className="flex-1 truncate">{conv.title}</span>
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-white/8 bg-black/40">
+                  <MessageSquare className="h-4 w-4 text-zinc-500" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <span className="block truncate font-medium">{conv.title}</span>
+                  <span className="block text-xs text-zinc-600">
+                    {conv.messageCount} messages
+                  </span>
+                </div>
                 <button
                   type="button"
                   onClick={(e) => {
                     e.stopPropagation();
                     onDelete(conv.id);
                   }}
-                  className="shrink-0 rounded p-1 text-zinc-600 transition-opacity hover:text-red-400 md:opacity-0 md:group-hover:opacity-100"
+                  className="shrink-0 rounded-full p-2 text-zinc-600 transition hover:bg-white/[0.05] hover:text-orange-300 md:opacity-0 md:group-hover:opacity-100"
                 >
                   <Trash2 className="h-3.5 w-3.5" />
                 </button>
               </div>
             ))
           )}
+        </div>
+
+        <div className="border-t border-white/8 px-4 py-4">
+          <Button
+            asChild
+            variant="ghost"
+            className="w-full justify-start gap-3 rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-6 text-zinc-300 hover:bg-white/[0.07] hover:text-white"
+          >
+            <Link href="/memories">
+              <Brain className="h-4 w-4 text-orange-300" />
+              <span>Memories</span>
+            </Link>
+          </Button>
         </div>
       </div>
     </>

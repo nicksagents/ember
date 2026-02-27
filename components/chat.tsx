@@ -1,7 +1,11 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Message, type MessageData } from "@/components/message";
+import {
+  Message,
+  type MessageData,
+  type MessageMeta,
+} from "@/components/message";
 import { ChatInput } from "@/components/chat-input";
 
 let msgCounter = 0;
@@ -22,6 +26,7 @@ export function Chat({
 }: ChatProps) {
   const [messages, setMessages] = useState<MessageData[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [activeModelLabel, setActiveModelLabel] = useState<string>("");
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = useCallback(() => {
@@ -33,6 +38,24 @@ export function Chat({
   useEffect(() => {
     scrollToBottom();
   }, [messages, scrollToBottom]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadConfig = async () => {
+      try {
+        const res = await fetch("/api/config");
+        const data = await res.json();
+        if (!res.ok || cancelled) return;
+        const model =
+          data?.modelRoles?.assistant || data?.model || "";
+        if (model) setActiveModelLabel(model);
+      } catch {}
+    };
+    void loadConfig();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Load messages when conversation changes
   useEffect(() => {
@@ -51,12 +74,28 @@ export function Chat({
               (entry.role === "user" || entry.role === "assistant") &&
               typeof entry.content === "string"
           )
-          .map((entry: { role: "user" | "assistant"; content: string }) => ({
-            id: uid(),
-            role: entry.role,
-            content: entry.content,
-          }));
+          .map(
+            (entry: {
+              role: "user" | "assistant";
+              content: string;
+              ts?: string;
+              meta?: MessageMeta | null;
+            }) => ({
+              id: uid(),
+              role: entry.role,
+              content: entry.content,
+              createdAt: entry.ts || null,
+              meta: entry.meta || null,
+            })
+          );
         setMessages(hydrated);
+        const latestModel = [...hydrated]
+          .reverse()
+          .find((entry) => entry.role === "assistant" && entry.meta?.model)
+          ?.meta?.model;
+        if (latestModel) {
+          setActiveModelLabel(latestModel);
+        }
       } catch {
         setMessages([]);
       }
@@ -81,7 +120,12 @@ export function Chat({
         return;
       }
 
-      const userMessage: MessageData = { id: uid(), role: "user", content };
+      const userMessage: MessageData = {
+        id: uid(),
+        role: "user",
+        content,
+        createdAt: new Date().toISOString(),
+      };
 
       // Optimistic update using functional state (no stale closure)
       setMessages((prev) => [...prev, userMessage]);
@@ -106,9 +150,14 @@ export function Chat({
           id: uid(),
           role: "assistant",
           content: data.content || "No response received.",
+          createdAt: new Date().toISOString(),
+          meta: data.meta || null,
         };
 
         setMessages((prev) => [...prev, assistantMessage]);
+        if (data?.meta?.model) {
+          setActiveModelLabel(data.meta.model);
+        }
         onConversationUpdate?.();
       } catch (error) {
         const errorMessage: MessageData = {
@@ -125,30 +174,30 @@ export function Chat({
   );
 
   return (
-    <>
+    <div className="flex min-h-0 flex-1 flex-col">
       <div
         ref={scrollRef}
-        className="scrollbar-hide flex-1 overflow-y-auto px-4 py-4"
+        className="scrollbar-hide flex-1 overflow-y-auto px-4 pb-4 pt-1 sm:px-6"
       >
-        {!conversationId ? (
-          <div className="flex h-full flex-col items-center justify-center text-zinc-500">
-            <p className="text-sm">Select or create a conversation</p>
-          </div>
-        ) : messages.length === 0 ? (
-          <div className="flex h-full flex-col items-center justify-center text-zinc-500">
-            <p className="mb-3 text-4xl">🔥</p>
-            <p className="text-sm">Send a message to get started</p>
+        {messages.length === 0 ? (
+          <div className="flex min-h-full flex-col items-center justify-center px-4 text-center">
+            <h2 className="ember-wordmark text-5xl font-semibold tracking-tight sm:text-7xl">
+              EMBER
+            </h2>
+            <p className="mt-5 max-w-2xl text-lg text-zinc-500 sm:text-2xl">
+              Type a message to get started
+            </p>
           </div>
         ) : (
-          <div className="mx-auto flex max-w-2xl flex-col gap-3">
+          <div className="mx-auto flex w-full max-w-5xl flex-col gap-8 pb-8 pt-6 sm:pt-10">
             {messages.map((msg) => (
               <Message key={msg.id} message={msg} />
             ))}
             {isLoading && (
               <div className="flex justify-start">
-                <div className="rounded-2xl bg-zinc-800 px-4 py-2.5 text-sm text-zinc-400">
+                <div className="rounded-full border border-orange-500/20 bg-white/[0.04] px-4 py-2 text-sm text-zinc-400">
                   <span className="inline-flex gap-1">
-                    <span className="animate-bounce">·</span>
+                    <span className="animate-bounce text-orange-300">·</span>
                     <span
                       className="animate-bounce"
                       style={{ animationDelay: "0.1s" }}
@@ -168,12 +217,23 @@ export function Chat({
           </div>
         )}
       </div>
-      <div className="mx-auto w-full max-w-2xl">
-        <ChatInput
-          onSend={handleSend}
-          disabled={isLoading || (!conversationId && !onEnsureConversation)}
-        />
+      <div className="px-4 pb-4 sm:px-6 sm:pb-6">
+        <div className="mx-auto w-full max-w-4xl">
+          <ChatInput
+            onSend={handleSend}
+            disabled={isLoading || (!conversationId && !onEnsureConversation)}
+            modelLabel={activeModelLabel}
+          />
+          <p className="mt-4 text-center text-sm text-zinc-600">
+            Press <span className="rounded bg-white/[0.04] px-2 py-1">Enter</span>{" "}
+            to send,{" "}
+            <span className="rounded bg-white/[0.04] px-2 py-1">
+              Shift + Enter
+            </span>{" "}
+            for a new line
+          </p>
+        </div>
       </div>
-    </>
+    </div>
   );
 }

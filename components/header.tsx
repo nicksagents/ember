@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { Settings, Menu, Brain } from "lucide-react";
+import { ChevronLeft, Menu, Settings } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 
 interface HeaderProps {
   title?: string;
@@ -16,53 +17,62 @@ export function Header({
   onToggleSidebar,
 }: HeaderProps) {
   return (
-    <header className="flex min-h-[48px] items-center justify-between border-b border-zinc-800 px-3 py-2">
+    <header
+      className={cn(
+        "flex min-h-[72px] items-center justify-between px-4 py-4 sm:px-6",
+        showBack && "border-b border-white/8"
+      )}
+    >
       <div className="flex items-center gap-2">
         {showBack ? (
-          <Link href="/">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-9 text-zinc-400 hover:text-zinc-100"
-            >
-              ← Back
-            </Button>
-          </Link>
+          <Button
+            asChild
+            variant="ghost"
+            size="icon"
+            className="h-11 w-11 rounded-full border border-white/10 bg-white/[0.02] text-zinc-300 hover:bg-white/[0.06] hover:text-white"
+          >
+            <Link href="/">
+              <ChevronLeft className="h-5 w-5" />
+            </Link>
+          </Button>
         ) : onToggleSidebar ? (
           <Button
             variant="ghost"
             size="icon"
             onClick={onToggleSidebar}
-            className="h-9 w-9 text-zinc-400 hover:text-zinc-100"
+            className="h-11 w-11 rounded-full border border-white/10 bg-white/[0.02] text-zinc-300 hover:bg-white/[0.06] hover:text-white"
           >
             <Menu className="h-5 w-5" />
           </Button>
         ) : null}
-        <h1 className="text-base font-semibold">{title}</h1>
+        {showBack ? (
+          <div className="flex flex-col">
+            <span className="text-[10px] uppercase tracking-[0.32em] text-zinc-600">
+              Ember
+            </span>
+            <h1 className="text-base font-semibold tracking-tight text-zinc-100">
+              {title}
+            </h1>
+          </div>
+        ) : (
+          <span className="ember-wordmark text-sm font-semibold tracking-[0.35em] md:hidden">
+            EMBER
+          </span>
+        )}
       </div>
-      {!showBack && (
-        <div className="flex items-center gap-1">
-          <Link href="/memories">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-9 gap-1.5 text-zinc-300 hover:text-zinc-100"
-            >
-              <Brain className="h-4 w-4" />
-              <span className="hidden sm:inline">Memories</span>
-            </Button>
-          </Link>
+      {!showBack ? (
+        <Button
+          asChild
+          variant="ghost"
+          size="icon"
+          className="h-11 w-11 rounded-full border border-white/10 bg-white/[0.02] text-zinc-300 hover:bg-white/[0.06] hover:text-white"
+        >
           <Link href="/settings">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-9 gap-1.5 text-zinc-300 hover:text-zinc-100"
-            >
-              <Settings className="h-4 w-4" />
-              <span className="hidden sm:inline">Settings</span>
-            </Button>
+            <Settings className="h-5 w-5" />
           </Link>
-        </div>
+        </Button>
+      ) : (
+        <div />
       )}
     </header>
   );
