@@ -2257,6 +2257,37 @@ function inferServerStartCommand(userContent) {
   return "npm run dev";
 }
 
+function inferScaffoldPreset(userContent) {
+  const text = String(userContent || "").toLowerCase();
+  if (/\bnext(?:\.js|js)?\b/.test(text) && /\bshadcn\b/.test(text)) {
+    return "nextjs-shadcn";
+  }
+  if (/\belectron\b/.test(text)) {
+    return "electron-forge-vite-ts";
+  }
+  if (/\bexpo\b/.test(text) || /\breact[-\s]?native\b/.test(text)) {
+    return "expo-default";
+  }
+  if (/\bfast\s*api\b/.test(text) || /\bfastapi\b/.test(text)) {
+    return "fastapi-uv";
+  }
+  if (/\bpython\b/.test(text) && /\buv\b/.test(text)) {
+    return /\bpackage\b|\blibrary\b|\blib\b/.test(text)
+      ? "python-uv-package"
+      : "python-uv-app";
+  }
+  if (/\bvite\b/.test(text) && /\bvue\b/.test(text)) {
+    return "vite-vue-ts";
+  }
+  if (/\bvite\b/.test(text) && /\bvanilla\b/.test(text)) {
+    return "vite-vanilla-ts";
+  }
+  if (/\bvite\b/.test(text)) {
+    return "vite-react-ts";
+  }
+  return "";
+}
+
 function inspectToolLoopMessages(messages) {
   const toolByCallId = new Map();
   const usedNames = [];
@@ -2333,6 +2364,14 @@ function buildServerCompletionGuard(userContent) {
 }
 
 function describeToolProgress(name, args, result, phase = "running") {
+  if (name === "scaffold_project") {
+    if (phase === "running") {
+      return `Scaffolding ${args?.preset || "project"} in ${args?.projectPath || "target folder"}`;
+    }
+    return result?.ok
+      ? `Project scaffolded in ${result.projectPath || args?.projectPath || "target folder"}`
+      : "Project scaffold failed";
+  }
   if (name === "scaffold_next_shadcn_project") {
     if (phase === "running") {
       return `Scaffolding Next.js + shadcn project in ${args?.projectPath || "target folder"}`;
@@ -2647,6 +2686,15 @@ async function handleChat(req, res) {
           text
         ) &&
         /\b(?:project|app|application|site|website|folder)\b/.test(text);
+      const scaffoldPreset = inferScaffoldPreset(userContent);
+      const scaffoldGenericApp =
+        Boolean(scaffoldPreset) &&
+        /\b(?:create|make|build|scaffold|set\s*up|initialize|init|bootstrap)\b/.test(
+          text
+        ) &&
+        /\b(?:project|app|application|site|website|folder|workspace|repo|repository)\b/.test(
+          text
+        );
       const listLike =
         text.includes("list") ||
         text.includes("what's in") ||
@@ -2689,6 +2737,20 @@ async function handleChat(req, res) {
             query: buildWebSearchQuery(userContent),
             limit: inferWebSearchLimit(userContent),
             site: extractWebSearchSite(userContent) || undefined,
+          },
+        };
+      }
+
+      if (scaffoldGenericApp) {
+        return {
+          name: "scaffold_project",
+          arguments: {
+            projectPath:
+              explicitProjectDir ||
+              recentProjectDir ||
+              path.join(desktop, "ember-project"),
+            preset: scaffoldPreset,
+            packageManager: "npm",
           },
         };
       }
