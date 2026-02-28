@@ -627,12 +627,125 @@ async function saveConversationSummary(id, summary) {
   );
 }
 
-async function appendToConversation(id, role, content) {
-  const record = { ts: new Date().toISOString(), role, content };
+async function appendToConversation(id, role, content, extra = {}) {
+  const record = { ts: new Date().toISOString(), role, content, ...extra };
   const filePath = conversationFilePath(id);
   await withFileLock(filePath, () =>
     appendFile(filePath, `${JSON.stringify(record)}\n`, "utf8")
   );
+}
+
+function toFiniteNumber(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function pickFiniteNumber(...values) {
+  for (const value of values) {
+    const next = toFiniteNumber(value);
+    if (next !== null) return next;
+  }
+  return null;
+}
+
+function nanosToMillis(value) {
+  const next = toFiniteNumber(value);
+  return next === null ? null : next / 1_000_000;
+}
+
+function estimateTokens(text) {
+  const input = typeof text === "string" ? text.trim() : "";
+  if (!input) return 0;
+  return Math.max(1, Math.ceil(input.length / 4));
+}
+
+function buildAssistantMeta({
+  finalResponse,
+  activeModel,
+  configuredModel,
+  contextMessages,
+  promptTokenEstimate,
+  promptMessageCount,
+  elapsedMs,
+  llmCalls,
+}) {
+  const response = finalResponse && typeof finalResponse === "object" ? finalResponse : {};
+  const usage = response.usage && typeof response.usage === "object" ? response.usage : {};
+  const timings =
+    response.timings && typeof response.timings === "object" ? response.timings : {};
+
+  const promptTokens = pickFiniteNumber(
+    usage.prompt_tokens,
+    usage.input_tokens,
+    response.prompt_eval_count,
+    response.prompt_tokens,
+    timings.prompt_n
+  );
+  const completionTokens = pickFiniteNumber(
+    usage.completion_tokens,
+    usage.output_tokens,
+    response.eval_count,
+    response.completion_tokens,
+    response.generated_tokens,
+    timings.predicted_n
+  );
+  const totalTokens = pickFiniteNumber(
+    usage.total_tokens,
+    response.total_tokens,
+    promptTokens !== null && completionTokens !== null
+      ? promptTokens + completionTokens
+      : null
+  );
+  const promptMs = pickFiniteNumber(
+    timings.prompt_ms,
+    nanosToMillis(response.prompt_eval_duration),
+    nanosToMillis(response.prompt_duration)
+  );
+  const completionMs = pickFiniteNumber(
+    timings.predicted_ms,
+    nanosToMillis(response.eval_duration),
+    nanosToMillis(response.completion_duration)
+  );
+  const totalMs = pickFiniteNumber(
+    timings.total_ms,
+    nanosToMillis(response.total_duration),
+    elapsedMs
+  );
+  const tokensPerSecond = pickFiniteNumber(
+    timings.predicted_per_second,
+    timings.tokens_per_second,
+    completionTokens !== null && completionMs
+      ? completionTokens / (completionMs / 1000)
+      : null,
+    completionTokens !== null && totalMs
+      ? completionTokens / (totalMs / 1000)
+      : null
+  );
+
+  const resolvedModel = String(response.model || activeModel || configuredModel || "").trim();
+  const preferredModel = String(activeModel || configuredModel || response.model || "").trim();
+
+  return {
+    model: preferredModel || resolvedModel || "Configured model",
+    providerModel:
+      resolvedModel && resolvedModel !== preferredModel ? resolvedModel : null,
+    contextTokens: Math.round(promptTokens ?? promptTokenEstimate),
+    contextMessages: promptMessageCount,
+    promptTokens: promptTokens !== null ? Math.round(promptTokens) : null,
+    completionTokens:
+      completionTokens !== null ? Math.round(completionTokens) : null,
+    totalTokens: totalTokens !== null ? Math.round(totalTokens) : null,
+    elapsedMs: totalMs !== null ? Number(totalMs.toFixed(1)) : null,
+    promptMs: promptMs !== null ? Number(promptMs.toFixed(1)) : null,
+    completionMs: completionMs !== null ? Number(completionMs.toFixed(1)) : null,
+    tokensPerSecond:
+      tokensPerSecond !== null ? Number(tokensPerSecond.toFixed(2)) : null,
+    llmCalls: Math.max(1, Math.round(toFiniteNumber(llmCalls) || 1)),
+  };
 }
 
 async function createConversation(title) {
@@ -2576,6 +2689,13 @@ async function handleChat(req, res) {
       { role: "system", content: systemMessage },
       ...contextMessages,
     ];
+    const promptMessageCount = fullMessages.length;
+    const promptTokenEstimate =
+      estimateTokens(systemMessage) +
+      contextMessages.reduce(
+        (sum, message) => sum + estimateTokens(message?.content),
+        0
+      );
 
     // Build LLM payload with Qwen3-recommended sampling parameters
     const payload = {
@@ -2631,7 +2751,9 @@ async function handleChat(req, res) {
     });
 
     // Call LLM
+    const llmStartedAt = Date.now();
     let llmCallCount = 0;
+    let lastLlmResponse = null;
     const callLLM = async (nextPayload) => {
       llmCallCount += 1;
       updateChatProgress(
@@ -2654,6 +2776,7 @@ async function handleChat(req, res) {
           throw new Error(`LLM server error: ${upstream.status} ${errorText}`);
         }
         const data = await upstream.json();
+        lastLlmResponse = data;
         await logEvent("llm_response", {
           conversationId,
           response: JSON.stringify(data).slice(0, 8000),
@@ -2771,7 +2894,7 @@ async function handleChat(req, res) {
         }
       : null;
 
-    const { assistantContent } = await runToolLoop({
+    const { assistantContent, finalResponse } = await runToolLoop({
       payload,
       callLLM,
       executeTool: async (name, args) => {
@@ -2812,9 +2935,21 @@ async function handleChat(req, res) {
     });
     await logEvent("assistant_response", { conversationId, content: assistantContent });
     updateChatProgress(conversationId, "running", "Assistant response ready");
+    const assistantMeta = buildAssistantMeta({
+      finalResponse: finalResponse || lastLlmResponse,
+      activeModel,
+      configuredModel: config.model,
+      contextMessages,
+      promptTokenEstimate,
+      promptMessageCount,
+      elapsedMs: Date.now() - llmStartedAt,
+      llmCalls: llmCallCount,
+    });
 
     // Save assistant response to conversation
-    await appendToConversation(conversationId, "assistant", assistantContent);
+    await appendToConversation(conversationId, "assistant", assistantContent, {
+      meta: assistantMeta,
+    });
 
     const assistantFacts = detectAssistantFacts(assistantContent, memories, 2);
     if (assistantFacts.length > 0) {
@@ -2844,7 +2979,7 @@ async function handleChat(req, res) {
       await saveManifest(manifest);
     }
 
-    sendJson(res, 200, { content: assistantContent });
+    sendJson(res, 200, { content: assistantContent, meta: assistantMeta });
     updateChatProgress(conversationId, "completed", "Response sent");
 
     if (pendingSummary) {
