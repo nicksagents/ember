@@ -1108,7 +1108,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Slider } from "@/components/ui/slider";
-import { getConfig, saveConfig, getModelsUrl, CORE_PROMPT, type AgentConfig } from "@/lib/config";
+import { getConfig, saveConfig, CORE_PROMPT, type AgentConfig } from "@/lib/config";
 
 export function SettingsForm() {
   const [config, setConfig] = useState<AgentConfig>({
@@ -1138,11 +1138,10 @@ export function SettingsForm() {
     setFetchingModels(true);
     setModelsError(null);
     try {
-      const modelsUrl = getModelsUrl(config.endpoint);
       const res = await fetch("/api/models", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ modelsUrl }),
+        body: JSON.stringify({ endpoint: config.endpoint }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -1151,7 +1150,9 @@ export function SettingsForm() {
       }
       if (data.models && data.models.length > 0) {
         setModels(data.models);
-        if (!config.model) {
+        if (data.models.length === 1) {
+          setConfig((prev) => ({ ...prev, model: data.models[0] }));
+        } else if (!config.model) {
           setConfig((prev) => ({ ...prev, model: data.models[0] }));
         }
       } else {
@@ -1348,14 +1349,84 @@ ENDOFFILE
 mkdir -p app/api/models
 cat > app/api/models/route.ts << 'ENDOFFILE'
 import { NextRequest, NextResponse } from "next/server";
+import { getModelsUrl } from "@/lib/config";
 
-export async function POST(req: NextRequest) {
+const isNonEmptyString = (value: unknown): value is string =>
+  typeof value === "string" && value.trim().length > 0;
+
+function extractModels(data: unknown): string[] {
+  let models: string[] = [];
+  const payload = data as
+    | {
+        data?: Array<{ id?: string; name?: string; model?: string }>;
+        models?: Array<{ id?: string; name?: string; model?: string }>;
+        result?: unknown;
+        id?: string;
+        name?: string;
+        model?: string;
+      }
+    | undefined;
+
+  if (Array.isArray(payload?.data)) {
+    models = payload.data
+      .map((model) => model.id || model.name || model.model)
+      .filter(isNonEmptyString);
+  } else if (Array.isArray(payload?.models)) {
+    models = payload.models
+      .map((model) => model.id || model.name || model.model)
+      .filter(isNonEmptyString);
+  } else if (Array.isArray(payload?.result)) {
+    models = extractModels(payload.result);
+  } else if (Array.isArray(data)) {
+    models = data
+      .map((model) => {
+        if (typeof model === "string") return model;
+        if (!model || typeof model !== "object") return "";
+        return (
+          (model as { id?: string }).id ||
+          (model as { name?: string }).name ||
+          (model as { model?: string }).model ||
+          ""
+        );
+      })
+      .filter(isNonEmptyString);
+  } else if (payload) {
+    models = [payload.id, payload.name, payload.model].filter(isNonEmptyString);
+  }
+
+  return [...new Set(models.map((model) => model.trim()).filter(Boolean))];
+}
+
+async function resolveModelsRequest(req: NextRequest) {
+  if (req.method === "GET") {
+    const endpoint = req.nextUrl.searchParams.get("endpoint");
+    const modelsUrlParam = req.nextUrl.searchParams.get("modelsUrl");
+    const modelsUrl = isNonEmptyString(modelsUrlParam)
+      ? modelsUrlParam.trim()
+      : isNonEmptyString(endpoint)
+        ? getModelsUrl(endpoint.trim())
+        : "";
+    return { modelsUrl };
+  }
+
+  const body = await req.json();
+  const endpoint =
+    body && typeof body.endpoint === "string" ? body.endpoint.trim() : "";
+  const modelsUrlParam =
+    body && typeof body.modelsUrl === "string" ? body.modelsUrl.trim() : "";
+
+  return {
+    modelsUrl: modelsUrlParam || (endpoint ? getModelsUrl(endpoint) : ""),
+  };
+}
+
+async function handleModels(req: NextRequest) {
   try {
-    const { modelsUrl } = await req.json();
+    const { modelsUrl } = await resolveModelsRequest(req);
 
     if (!modelsUrl) {
       return NextResponse.json(
-        { error: "modelsUrl is required" },
+        { error: "endpoint or modelsUrl is required" },
         { status: 400 }
       );
     }
@@ -1374,18 +1445,14 @@ export async function POST(req: NextRequest) {
     }
 
     const data = await response.json();
+    const models = extractModels(data);
 
-    let models: string[] = [];
-
-    if (Array.isArray(data.data)) {
-      models = data.data.map((m: { id?: string }) => m.id).filter(Boolean);
-    } else if (Array.isArray(data.models)) {
-      models = data.models.map((m: { name?: string; model?: string }) => m.name || m.model).filter(Boolean);
-    } else if (Array.isArray(data)) {
-      models = data.map((m: { id?: string; name?: string }) => m.id || m.name).filter(Boolean);
-    }
-
-    return NextResponse.json({ models });
+    return NextResponse.json({
+      models,
+      count: models.length,
+      modelsUrl,
+      selectedModel: models.length === 1 ? models[0] : null,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     return NextResponse.json(
@@ -1393,6 +1460,14 @@ export async function POST(req: NextRequest) {
       { status: 502 }
     );
   }
+}
+
+export async function GET(req: NextRequest) {
+  return handleModels(req);
+}
+
+export async function POST(req: NextRequest) {
+  return handleModels(req);
 }
 ENDOFFILE
 

@@ -19,7 +19,6 @@ import { Textarea } from "@/components/ui/textarea";
 import { Slider } from "@/components/ui/slider";
 import {
   DEFAULT_AGENT_CONFIG,
-  getModelsUrl,
   PROVIDER_PRESETS,
   type AgentConfig,
 } from "@/lib/config";
@@ -165,11 +164,10 @@ export function SettingsForm() {
     setFetchingModels(true);
     setModelsError(null);
     try {
-      const modelsUrl = getModelsUrl(config.endpoint);
       const res = await fetch("/api/models", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ modelsUrl }),
+        body: JSON.stringify({ endpoint: config.endpoint }),
       });
 
       const data = await res.json();
@@ -181,7 +179,9 @@ export function SettingsForm() {
 
       if (data.models && data.models.length > 0) {
         setModels(data.models);
-        if (!config.model) {
+        if (data.models.length === 1) {
+          setConfig((prev) => ({ ...prev, model: data.models[0] }));
+        } else if (!config.model) {
           setConfig((prev) => ({ ...prev, model: data.models[0] }));
         }
       } else {
@@ -313,15 +313,23 @@ export function SettingsForm() {
               <p className="text-xs text-zinc-500">
                 {models.length} model{models.length !== 1 ? "s" : ""} available
               </p>
+              <p className="text-xs text-zinc-500">
+                Select a model, then click Save before returning to chat.
+              </p>
             </div>
           ) : (
-            <Input
-              id="model"
-              value={config.model}
-              onChange={(e) => setConfig({ ...config, model: e.target.value })}
-              placeholder="Select after fetching or type manually"
-              className="border-zinc-700 bg-zinc-950 text-zinc-100"
-            />
+            <div className="space-y-1.5">
+              <Input
+                id="model"
+                value={config.model}
+                onChange={(e) => setConfig({ ...config, model: e.target.value })}
+                placeholder="Select after fetching or type manually"
+                className="border-zinc-700 bg-zinc-950 text-zinc-100"
+              />
+              <p className="text-xs text-zinc-500">
+                After changing the model, click Save to apply it to new chats.
+              </p>
+            </div>
           )}
 
           {modelsError && <p className="text-xs text-red-400">{modelsError}</p>}
