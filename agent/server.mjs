@@ -181,11 +181,7 @@ const DEFAULT_CONFIG = {
   top_k: 20,
   min_p: 0.05,
   repetition_penalty: 1.05,
-<<<<<<< HEAD
   max_tokens: 4096,
-=======
-  max_tokens: 3072,
->>>>>>> 75f29ea9e5e4921d67d7933482496f71807a9944
   statelessProvider: true,
   lightweightMode: false,
   maxToolRounds: 28,
@@ -3181,18 +3177,13 @@ async function handleChat(req, res) {
     if (config.max_tokens) {
       payload.max_tokens = config.max_tokens;
     }
-<<<<<<< HEAD
-    // For Qwen models, ensure a generous max_tokens — write_file calls
-    // with large content need room, and the completion guards handle
-    // preventing endless looping (not token limits)
+    // Prompt-only XML tools need enough room for larger serialized arguments,
+    // while native-tool flows benefit from a shorter completion budget.
     if (isQwenCoder && !payload.max_tokens) {
-      payload.max_tokens = 4096;
-=======
-    // For Qwen models during tool-requiring tasks, cap response length to
-    // prevent long narratives and force concise tool-call output
-    if (isQwenCoder && requiresTool) {
-      payload.max_tokens = Math.min(payload.max_tokens || 3072, 1536);
->>>>>>> 75f29ea9e5e4921d67d7933482496f71807a9944
+      payload.max_tokens = usePromptOnlyTools ? 4096 : 3072;
+    }
+    if (isQwenCoder && requiresTool && !usePromptOnlyTools) {
+      payload.max_tokens = Math.min(payload.max_tokens, 1536);
     }
     if (typeof config.min_p === "number" && config.min_p > 0) {
       payload.min_p = config.min_p;
@@ -3394,21 +3385,12 @@ async function handleChat(req, res) {
       );
     }
     if (requiresTool && isQwenCoderModel(activeModel)) {
-<<<<<<< HEAD
-      systemNotes.push(
-        "CRITICAL: Call tools using <tool_call>{\"name\":\"...\",\"arguments\":{...}}</tool_call>. " +
-        "NEVER use ```bash blocks. NEVER fabricate command output. " +
-        "NEVER stop after saying what you will do -- call the tool NOW. " +
-        "Complete ALL requested steps before responding. If the user asks to write a file AND start a server, do BOTH with tool calls before giving your final answer. " +
-        "NEVER say 'I have completed' until every step is done and verified with tools."
-      );
-=======
->>>>>>> 75f29ea9e5e4921d67d7933482496f71807a9944
       if (usePromptOnlyTools) {
         systemNotes.push(
           "CRITICAL: Call tools using <tool_call>{\"name\":\"...\",\"arguments\":{...}}</tool_call>. " +
           "NEVER use ```bash blocks. NEVER fabricate command output. " +
           "NEVER stop after saying what you will do -- call the tool NOW. " +
+          "Complete ALL requested steps before responding. If the user asks to write a file AND start a server, do BOTH with tool calls before giving your final answer. " +
           "Continue the tool loop until the task is complete and verified. " +
           "You run on llama.cpp prompt-only tools, so use XML <tool_call> format only."
         );
@@ -3417,6 +3399,7 @@ async function handleChat(req, res) {
           "CRITICAL: Use the provided tool interface directly when a tool is needed. " +
           "Do not write bash blocks, fake tool output, or plain-text JSON tool calls. " +
           "Use specialized tools before run_command when one matches the task. " +
+          "Complete ALL requested steps before responding, then verify before the final answer. " +
           "Continue the tool loop until the task is complete and verified."
         );
       }
@@ -3454,13 +3437,8 @@ async function handleChat(req, res) {
         ? config.maxToolRounds
         : DEFAULT_CONFIG.maxToolRounds;
     const effectiveMaxRounds = requiresTool
-<<<<<<< HEAD
-      ? Math.min(configuredMaxRounds, isGitRequest ? 20 : isReadOnlyFsRequest ? 8 : 15)
-      : 10;
-=======
       ? Math.min(configuredMaxRounds, isGitRequest ? 20 : isReadOnlyFsRequest ? 8 : 16)
-      : 8;
->>>>>>> 75f29ea9e5e4921d67d7933482496f71807a9944
+      : 10;
     const maxToolRounds = isPureWebLookup
       ? Math.min(effectiveMaxRounds, 3)
       : effectiveMaxRounds;

@@ -27,6 +27,7 @@ let uiProbeTimer = null;
 let frame = 0;
 let startTs = 0;
 let uiStatus = "WAITING";
+const RECENT_OUTPUT_LIMIT = 4000;
 
 const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -43,6 +44,65 @@ function localUrl(port) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function createProcessState(label, logPath) {
+  return {
+    label,
+    logPath,
+    recentOutput: "",
+    lastError: null,
+    exitCode: null,
+    exitSignal: null,
+    startupComplete: false,
+  };
+}
+
+function stripAnsi(value) {
+  return value.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
+}
+
+function truncateDisplay(text, maxChars = 220) {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars - 3)}...`;
+}
+
+function rememberProcessOutput(state, chunk) {
+  state.recentOutput = `${state.recentOutput}${String(chunk)}`.slice(-RECENT_OUTPUT_LIMIT);
+}
+
+function pickFailureDetail(state) {
+  const lines = stripAnsi(state.recentOutput)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const ignoredLine = /^(==== Ember start|> |at |Node\.js v\d+|Local:|Network:|Logs:|\^+$)/i;
+  const preferredLine = /(error|failed|syntaxerror|unexpected token|eaddr|eperm|enoent|listen)/i;
+
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (!ignoredLine.test(lines[i]) && preferredLine.test(lines[i])) {
+      return lines[i];
+    }
+  }
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (!ignoredLine.test(lines[i])) {
+      return lines[i];
+    }
+  }
+  return "";
+}
+
+function formatProcessFailure(state, phase = "startup") {
+  const exitDetail = state.lastError?.message
+    || (state.exitSignal
+      ? `signal ${state.exitSignal}`
+      : state.exitCode !== null
+        ? `exit code ${state.exitCode}`
+        : "unknown error");
+  const detail = pickFailureDetail(state);
+  const base = `  ${state.label} failed during ${phase} (${exitDetail}).`;
+  const withDetail = detail ? `${base} Last log: ${detail}` : `${base} Check ${state.logPath}.`;
+  return truncateDisplay(withDetail);
 }
 
 function writeAt(row, text) {
@@ -126,10 +186,16 @@ async function waitForHealth(url, timeoutMs) {
   return false;
 }
 
-function wireLogs(proc, filePath) {
+function wireLogs(proc, filePath, state) {
   const stream = fs.createWriteStream(filePath, { flags: "a" });
-  proc.stdout?.on("data", (chunk) => stream.write(String(chunk)));
-  proc.stderr?.on("data", (chunk) => stream.write(String(chunk)));
+  proc.stdout?.on("data", (chunk) => {
+    stream.write(String(chunk));
+    if (state) rememberProcessOutput(state, chunk);
+  });
+  proc.stderr?.on("data", (chunk) => {
+    stream.write(String(chunk));
+    if (state) rememberProcessOutput(state, chunk);
+  });
 }
 
 function restoreCursor() {
@@ -149,7 +215,7 @@ function killTree(child, signal) {
   }
 }
 
-function shutdown(signal) {
+function shutdown(signal, options = {}) {
   if (shuttingDown) {
     // Second Ctrl+C: force-kill everything immediately
     try { killTree(uiProcess, "SIGKILL"); } catch {}
@@ -161,7 +227,7 @@ function shutdown(signal) {
   shuttingDown = true;
   stopAnimations();
   paintUiStatus("NOT READY");
-  writeAt(ROW.message, `  stopping (${signal})...`);
+  writeAt(ROW.message, options.message || `  stopping (${signal})...`);
   writeAt(ROW.running, "  [● STOPPING] shutting down runtime + web UI");
 
   // Send SIGTERM to both process groups
@@ -244,6 +310,8 @@ async function main() {
   writeAt(ROW.close, "  Press Ctrl+C to stop Ember.");
 
   const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
+  const agentState = createProcessState("Agent runtime", agentLogPath);
+  const uiState = createProcessState("Web UI", uiLogPath);
 
   writeAt(ROW.message, "  Starting agent runtime...");
   agentProcess = spawn("node", ["agent/server.mjs"], {
@@ -256,7 +324,28 @@ async function main() {
       AGENT_PORT: String(AGENT_PORT),
     },
   });
-  wireLogs(agentProcess, agentLogPath);
+  wireLogs(agentProcess, agentLogPath, agentState);
+  agentProcess.on("error", (error) => {
+    agentState.lastError = error;
+    if (shuttingDown) return;
+    paintUiStatus("NOT READY");
+    shutdown("agent_error", { message: formatProcessFailure(agentState) });
+  });
+  agentProcess.on("exit", (code, signal) => {
+    agentState.exitCode = code;
+    agentState.exitSignal = signal;
+    if (shuttingDown) return;
+    paintUiStatus("NOT READY");
+    shutdown(
+      agentState.startupComplete ? "agent_exit" : "agent_startup_exit",
+      {
+        message: formatProcessFailure(
+          agentState,
+          agentState.startupComplete ? "runtime" : "startup"
+        ),
+      }
+    );
+  });
 
   writeAt(ROW.message, "  Starting web UI...");
   uiProcess = spawn(
@@ -274,29 +363,42 @@ async function main() {
     },
   }
   );
-  wireLogs(uiProcess, uiLogPath);
-
-  agentProcess.on("error", () => {
+  wireLogs(uiProcess, uiLogPath, uiState);
+  uiProcess.on("error", (error) => {
+    uiState.lastError = error;
+    if (shuttingDown) return;
     paintUiStatus("NOT READY");
-    writeAt(ROW.message, "  Failed to start agent runtime. Check logs.");
-    shutdown("agent_error");
+    shutdown("ui_error", { message: formatProcessFailure(uiState) });
   });
-
-  uiProcess.on("error", () => {
+  uiProcess.on("exit", (code, signal) => {
+    uiState.exitCode = code;
+    uiState.exitSignal = signal;
+    if (shuttingDown) return;
     paintUiStatus("NOT READY");
-    writeAt(ROW.message, "  Failed to start web UI. Check logs.");
-    shutdown("ui_error");
+    shutdown(
+      uiState.startupComplete ? "ui_exit" : "ui_startup_exit",
+      {
+        message: formatProcessFailure(
+          uiState,
+          uiState.startupComplete ? "runtime" : "startup"
+        ),
+      }
+    );
   });
 
   const agentReady = await waitForHealth(`http://127.0.0.1:${AGENT_PORT}/health`, 25000);
   if (!agentReady) {
+    if (shuttingDown) return;
     paintUiStatus("NOT READY");
     writeAt(ROW.message, "  Agent runtime failed to become healthy.");
     shutdown("agent_timeout");
     return;
   }
+  agentState.startupComplete = true;
 
   const uiReady = await waitForHealth(`http://127.0.0.1:${UI_PORT}`, 45000);
+  if (shuttingDown) return;
+  uiState.startupComplete = uiReady;
   uiStatus = uiReady ? "READY" : "NOT READY";
   paintUiStatus(uiStatus);
   writeAt(
@@ -312,6 +414,9 @@ async function main() {
     const nextStatus = (await probeUiStatus()) || "WAITING";
     if (nextStatus !== uiStatus) {
       uiStatus = nextStatus;
+      if (nextStatus === "READY") {
+        uiState.startupComplete = true;
+      }
       paintUiStatus(uiStatus);
       writeAt(
         ROW.message,
@@ -322,19 +427,6 @@ async function main() {
     }
   }, 2000);
 
-  agentProcess.on("exit", () => {
-    if (shuttingDown) return;
-    paintUiStatus("NOT READY");
-    writeAt(ROW.message, "  Agent runtime exited unexpectedly.");
-    shutdown("agent_exit");
-  });
-
-  uiProcess.on("exit", () => {
-    if (shuttingDown) return;
-    paintUiStatus("NOT READY");
-    writeAt(ROW.message, "  Web UI exited unexpectedly.");
-    shutdown("ui_exit");
-  });
 }
 
 main().catch((error) => {
