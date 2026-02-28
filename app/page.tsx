@@ -116,7 +116,7 @@ export default function Home() {
   }, [activeId]);
 
   return (
-    <div className="flex h-full min-h-0 flex-1 overflow-hidden bg-black/30">
+    <div className="flex h-full min-h-0 flex-1 overflow-hidden bg-black/20">
       <Sidebar
         conversations={conversations}
         activeId={activeId}

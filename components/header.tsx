@@ -19,7 +19,9 @@ export function Header({
   return (
     <header
       className={cn(
-        "flex min-h-[60px] items-center justify-between px-4 py-3 sm:min-h-[64px] sm:px-5",
+        "sticky top-0 z-30 flex min-h-[56px] items-center justify-between border-b border-transparent px-4 py-2.5 backdrop-blur-xl sm:min-h-[58px] sm:px-5",
+        !showBack &&
+          "bg-[linear-gradient(180deg,rgba(8,8,8,0.9),rgba(8,8,8,0.72),rgba(8,8,8,0.18))]",
         showBack && "border-b border-white/8"
       )}
     >
@@ -29,7 +31,7 @@ export function Header({
             asChild
             variant="ghost"
             size="icon"
-            className="h-10 w-10 rounded-full border border-white/10 bg-white/[0.02] text-zinc-300 hover:bg-white/[0.06] hover:text-white"
+            className="h-9 w-9 rounded-full border border-white/10 bg-white/[0.02] text-zinc-300 hover:bg-white/[0.06] hover:text-white"
           >
             <Link href="/">
               <ChevronLeft className="h-4 w-4" />
@@ -40,7 +42,7 @@ export function Header({
             variant="ghost"
             size="icon"
             onClick={onToggleSidebar}
-            className="h-10 w-10 rounded-full border border-white/10 bg-white/[0.02] text-zinc-300 hover:bg-white/[0.06] hover:text-white"
+            className="h-9 w-9 rounded-full border border-white/10 bg-white/[0.02] text-zinc-300 hover:bg-white/[0.06] hover:text-white"
           >
             <Menu className="h-4 w-4" />
           </Button>
@@ -66,7 +68,7 @@ export function Header({
             asChild
             variant="ghost"
             size="icon"
-            className="h-10 w-10 rounded-full border border-white/10 bg-white/[0.02] text-zinc-300 hover:bg-white/[0.06] hover:text-white"
+            className="h-9 w-9 rounded-full border border-white/10 bg-white/[0.02] text-zinc-300 hover:bg-white/[0.06] hover:text-white"
           >
             <Link href="/memories" aria-label="Memories">
               <Brain className="h-4 w-4" />
@@ -76,7 +78,7 @@ export function Header({
             asChild
             variant="ghost"
             size="icon"
-            className="h-10 w-10 rounded-full border border-white/10 bg-white/[0.02] text-zinc-300 hover:bg-white/[0.06] hover:text-white"
+            className="h-9 w-9 rounded-full border border-white/10 bg-white/[0.02] text-zinc-300 hover:bg-white/[0.06] hover:text-white"
           >
             <Link href="/settings" aria-label="Settings">
               <Settings className="h-4 w-4" />

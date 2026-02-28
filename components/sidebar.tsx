@@ -76,12 +76,12 @@ export function Sidebar({
 
       <div
         className={cn(
-          "fixed inset-y-0 left-0 z-50 flex h-full w-[296px] flex-col border-r border-white/8 bg-[linear-gradient(180deg,rgba(255,255,255,0.025),rgba(255,255,255,0.01))] pt-safe backdrop-blur",
-          "md:relative md:z-auto md:w-[288px] md:shrink-0"
+          "fixed inset-y-0 left-0 z-50 flex h-full w-[284px] flex-col border-r border-white/8 bg-[linear-gradient(180deg,rgba(255,255,255,0.025),rgba(255,255,255,0.01))] pt-safe backdrop-blur",
+          "md:relative md:z-auto md:w-[272px] md:shrink-0"
         )}
       >
-        <div className="flex items-start justify-between px-4 pb-4 pt-5">
-          <div className="ember-wordmark text-[2rem] font-semibold tracking-tight">
+        <div className="flex items-start justify-between px-4 pb-4 pt-4">
+          <div className="ember-wordmark text-[1.7rem] font-semibold tracking-tight">
             EMBER
           </div>
           <div className="flex items-center gap-2">
@@ -89,7 +89,7 @@ export function Sidebar({
               onClick={handleNew}
               variant="ghost"
               size="icon"
-              className="h-10 w-10 rounded-full border border-white/10 bg-white/[0.03] text-zinc-200 hover:bg-white/[0.08] hover:text-white"
+              className="h-9 w-9 rounded-full border border-white/10 bg-white/[0.03] text-zinc-200 hover:bg-white/[0.08] hover:text-white"
             >
               <Plus className="h-4 w-4" />
             </Button>
@@ -97,7 +97,7 @@ export function Sidebar({
               variant="ghost"
               size="icon"
               onClick={onClose}
-              className="h-10 w-10 rounded-full border border-white/10 bg-white/[0.03] text-zinc-300 hover:bg-white/[0.08] hover:text-white md:hidden"
+              className="h-9 w-9 rounded-full border border-white/10 bg-white/[0.03] text-zinc-300 hover:bg-white/[0.08] hover:text-white md:hidden"
             >
               <X className="h-4 w-4" />
             </Button>
@@ -105,7 +105,7 @@ export function Sidebar({
         </div>
 
         <div className="px-4 pb-3">
-          <div className="flex items-center gap-3 rounded-[18px] border border-white/10 bg-white/[0.04] px-3.5 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
+          <div className="flex items-center gap-3 rounded-[16px] border border-white/10 bg-white/[0.04] px-3 py-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
             <Search className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
             <input
               type="text"
@@ -150,13 +150,13 @@ export function Sidebar({
                   if (e.key === "Enter") handleSelect(conv.id);
                 }}
                 className={cn(
-                  "group mb-1.5 flex min-h-[48px] items-center gap-3 rounded-[18px] border px-3 py-2.5 text-[13px] transition-colors cursor-pointer",
+                  "group mb-1.5 flex min-h-[46px] items-center gap-3 rounded-[16px] border px-3 py-2 text-[12.5px] transition-colors cursor-pointer",
                   activeId === conv.id
                     ? "border-orange-500/20 bg-white/[0.08] text-zinc-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
                     : "border-transparent text-zinc-400 hover:border-white/6 hover:bg-white/[0.04] hover:text-zinc-200"
                 )}
               >
-                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/8 bg-black/40">
+                <div className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-full border border-white/8 bg-black/40">
                   <MessageSquare className="h-3.5 w-3.5 text-zinc-500" />
                 </div>
                 <div className="min-w-0 flex-1">
@@ -184,7 +184,7 @@ export function Sidebar({
         <div className="border-t border-white/8 px-4 py-4">
           <Button
             variant="ghost"
-            className="w-full justify-center gap-2 rounded-[18px] border border-white/8 bg-white/[0.03] px-4 py-5 text-[13px] text-zinc-400 hover:bg-white/[0.07] hover:text-red-300"
+            className="w-full justify-center gap-2 rounded-[16px] border border-white/8 bg-white/[0.03] px-4 py-4 text-[12.5px] text-zinc-400 hover:bg-white/[0.07] hover:text-red-300"
             disabled={conversations.length === 0}
             onClick={onDeleteAll}
           >

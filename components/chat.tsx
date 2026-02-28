@@ -172,19 +172,19 @@ export function Chat({
     <div className="flex min-h-0 flex-1 flex-col">
       <div
         ref={scrollRef}
-        className="scrollbar-hide flex-1 overflow-y-auto px-4 pb-4 pt-1 sm:px-6"
+        className="scrollbar-hide flex-1 overflow-y-auto px-4 pb-24 pt-1 sm:px-6 sm:pb-28"
       >
         {messages.length === 0 ? (
           <div className="flex min-h-full flex-col items-center justify-center px-4 text-center">
-            <h2 className="ember-wordmark text-4xl font-semibold tracking-tight sm:text-5xl">
+            <h2 className="ember-wordmark text-[2.35rem] font-semibold tracking-tight sm:text-[3rem]">
               EMBER
             </h2>
-            <p className="mt-4 max-w-xl text-base text-zinc-500 sm:text-lg">
+            <p className="mt-3 max-w-lg text-[15px] text-zinc-500 sm:text-base">
               Type a message to get started
             </p>
           </div>
         ) : (
-          <div className="mx-auto flex w-full max-w-[56rem] flex-col gap-6 pb-6 pt-5 sm:pt-7">
+          <div className="mx-auto flex w-full max-w-[50rem] flex-col gap-5 pb-5 pt-4 sm:pt-6">
             {messages.map((msg) => (
               <Message key={msg.id} message={msg} />
             ))}
@@ -212,21 +212,24 @@ export function Chat({
           </div>
         )}
       </div>
-      <div className="px-4 pb-4 sm:px-6 sm:pb-6">
-        <div className="mx-auto w-full max-w-[52rem]">
-          <ChatInput
-            onSend={handleSend}
-            disabled={isLoading || (!conversationId && !onEnsureConversation)}
-            modelLabel={activeModelLabel}
-          />
-          <p className="mt-3 text-center text-xs text-zinc-600">
-            Press <span className="rounded bg-white/[0.04] px-2 py-1">Enter</span>{" "}
-            to send,{" "}
-            <span className="rounded bg-white/[0.04] px-2 py-1">
-              Shift + Enter
-            </span>{" "}
-            for a new line
-          </p>
+      <div className="sticky bottom-0 z-20 px-4 pb-4 pt-3 sm:px-6 sm:pb-5 relative">
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 top-0 bg-[linear-gradient(180deg,rgba(3,3,3,0),rgba(3,3,3,0.58)_18%,rgba(3,3,3,0.9)_62%,rgba(3,3,3,0.98))]" />
+        <div className="mx-auto w-full max-w-[46rem]">
+          <div className="relative">
+            <ChatInput
+              onSend={handleSend}
+              disabled={isLoading || (!conversationId && !onEnsureConversation)}
+              modelLabel={activeModelLabel}
+            />
+            <p className="mt-3 text-center text-xs text-zinc-600">
+              Press <span className="rounded bg-white/[0.04] px-2 py-1">Enter</span>{" "}
+              to send,{" "}
+              <span className="rounded bg-white/[0.04] px-2 py-1">
+                Shift + Enter
+              </span>{" "}
+              for a new line
+            </p>
+          </div>
         </div>
       </div>
     </div>

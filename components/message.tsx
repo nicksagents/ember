@@ -40,21 +40,21 @@ export function Message({ message }: MessageProps) {
       <div
         className={cn(
           "w-full",
-          isUser ? "max-w-[min(100%,24rem)]" : "max-w-[44rem]"
+          isUser ? "max-w-[min(100%,22rem)]" : "max-w-[40rem]"
         )}
       >
         <div
           className={cn(
             "whitespace-pre-wrap break-words",
             isUser
-              ? "rounded-[1.45rem] border border-white/10 bg-white/[0.08] px-4 py-2.5 text-[15px] leading-6 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
-              : "text-[15px] leading-7 text-zinc-100"
+              ? "rounded-[1.35rem] border border-white/10 bg-white/[0.08] px-4 py-2.5 text-[14px] leading-6 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
+              : "text-[14px] leading-[1.8] text-zinc-100"
           )}
         >
           {message.content}
         </div>
         {meta ? (
-          <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-zinc-500">
+          <div className="mt-3 flex flex-wrap items-center gap-x-3.5 gap-y-1.5 text-[11px] text-zinc-500">
             {meta.model ? (
               <span className="inline-flex items-center gap-2 rounded-full bg-white/[0.05] px-2.5 py-1 text-zinc-300">
                 <Box className="h-3 w-3" />

@@ -29,8 +29,8 @@ export default function RootLayout({
   return (
     <html lang="en" className="dark">
       <body className="bg-background text-foreground antialiased">
-        <div className="flex min-h-dvh flex-col px-2 py-2 pt-safe sm:px-3 sm:py-3">
-          <div className="ember-shell flex min-h-0 flex-1 overflow-hidden rounded-[28px] border border-white/10">
+        <div className="flex min-h-dvh flex-col px-1.5 py-1.5 pt-safe sm:px-2.5 sm:py-2.5">
+          <div className="ember-shell flex min-h-0 flex-1 overflow-hidden rounded-[24px] border border-white/10">
             {children}
           </div>
         </div>
