@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { Box, Plus, SendHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -9,25 +9,34 @@ interface ChatInputProps {
   onSend: (message: string) => void;
   disabled?: boolean;
   modelLabel?: string | null;
+  onDraftStateChange?: (hasDraft: boolean) => void;
 }
 
 export function ChatInput({
   onSend,
   disabled = false,
   modelLabel,
+  onDraftStateChange,
 }: ChatInputProps) {
   const [input, setInput] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    return () => {
+      onDraftStateChange?.(false);
+    };
+  }, [onDraftStateChange]);
 
   const handleSend = useCallback(() => {
     const trimmed = input.trim();
     if (!trimmed || disabled) return;
     onSend(trimmed);
     setInput("");
+    onDraftStateChange?.(false);
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
-  }, [input, disabled, onSend]);
+  }, [input, disabled, onDraftStateChange, onSend]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -37,7 +46,9 @@ export function ChatInput({
   };
 
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setInput(e.target.value);
+    const nextValue = e.target.value;
+    setInput(nextValue);
+    onDraftStateChange?.(Boolean(nextValue.trim()));
     const el = e.target;
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 156)}px`;

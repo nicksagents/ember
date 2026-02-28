@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { MessageSquare, Plus, Search, Trash2, X } from "lucide-react";
+import { EmberEye } from "@/components/ember-eye";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -22,6 +23,8 @@ interface SidebarProps {
   onDeleteAll: () => void;
   isOpen: boolean;
   onClose: () => void;
+  isTyping?: boolean;
+  isThinking?: boolean;
 }
 
 export function Sidebar({
@@ -33,6 +36,8 @@ export function Sidebar({
   onDeleteAll,
   isOpen,
   onClose,
+  isTyping = false,
+  isThinking = false,
 }: SidebarProps) {
   const [query, setQuery] = useState("");
 
@@ -81,9 +86,7 @@ export function Sidebar({
         )}
       >
         <div className="flex items-start justify-between px-4 pb-4 pt-4">
-          <div className="ember-wordmark text-[1.7rem] font-semibold tracking-tight">
-            EMBER
-          </div>
+          <EmberEye isTyping={isTyping} isThinking={isThinking} />
           <div className="flex items-center gap-2">
             <Button
               onClick={handleNew}

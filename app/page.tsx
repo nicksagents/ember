@@ -9,6 +9,8 @@ export default function Home() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [isTyping, setIsTyping] = useState(false);
+  const [isThinking, setIsThinking] = useState(false);
 
   // Open sidebar by default on desktop only
   useEffect(() => {
@@ -126,6 +128,8 @@ export default function Home() {
         onDeleteAll={handleDeleteAll}
         isOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
+        isTyping={isTyping}
+        isThinking={isThinking}
       />
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <Header onToggleSidebar={() => setSidebarOpen((prev) => !prev)} />
@@ -133,6 +137,8 @@ export default function Home() {
           conversationId={activeId}
           onConversationUpdate={handleConversationUpdate}
           onEnsureConversation={ensureConversation}
+          onTypingChange={setIsTyping}
+          onThinkingChange={setIsThinking}
         />
       </div>
     </div>

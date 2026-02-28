@@ -17,12 +17,16 @@ interface ChatProps {
   conversationId: string | null;
   onConversationUpdate?: () => void;
   onEnsureConversation?: () => Promise<string | null>;
+  onTypingChange?: (typing: boolean) => void;
+  onThinkingChange?: (thinking: boolean) => void;
 }
 
 export function Chat({
   conversationId,
   onConversationUpdate,
   onEnsureConversation,
+  onTypingChange,
+  onThinkingChange,
 }: ChatProps) {
   const [messages, setMessages] = useState<MessageData[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -38,6 +42,17 @@ export function Chat({
   useEffect(() => {
     scrollToBottom();
   }, [messages, scrollToBottom]);
+
+  useEffect(() => {
+    onThinkingChange?.(isLoading);
+  }, [isLoading, onThinkingChange]);
+
+  useEffect(() => {
+    return () => {
+      onTypingChange?.(false);
+      onThinkingChange?.(false);
+    };
+  }, [onThinkingChange, onTypingChange]);
 
   useEffect(() => {
     let cancelled = false;
@@ -220,6 +235,7 @@ export function Chat({
               onSend={handleSend}
               disabled={isLoading || (!conversationId && !onEnsureConversation)}
               modelLabel={activeModelLabel}
+              onDraftStateChange={onTypingChange}
             />
             <p className="mt-3 text-center text-xs text-zinc-600">
               Press <span className="rounded bg-white/[0.04] px-2 py-1">Enter</span>{" "}
