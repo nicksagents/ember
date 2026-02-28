@@ -34,6 +34,25 @@ import {
   loadToolPlugins,
   createFsPolicy,
 } from "./tooling.mjs";
+import {
+  LOCAL_IP_COMMAND,
+  TAILSCALE_IPV4_COMMAND,
+  HOSTNAME_COMMAND,
+  matchesCommandHint,
+  classifyLocalMachineInfoTask,
+  buildExecutionPlan,
+  formatExecutionPlanNote,
+} from "./orchestration.mjs";
+import {
+  isQwenCoderModel,
+  buildQwenXmlToolSystemMessage,
+  buildQwenToolContinuationPrompt,
+} from "./qwen.mjs";
+import {
+  shouldUsePromptOnlyTools,
+  extractUnsupportedPayloadParams,
+  stripUnsupportedPayloadParams,
+} from "./provider-compat.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -815,11 +834,6 @@ function buildToolTrace(messages) {
     }
   }
   return traces;
-}
-
-function isQwenCoderModel(modelName) {
-  const value = String(modelName || "").toLowerCase();
-  return value.includes("qwen") && value.includes("coder");
 }
 
 async function createConversation(title) {
@@ -2298,33 +2312,110 @@ function inspectToolLoopMessages(messages) {
         const name = toolCall?.function?.name;
         const id = toolCall?.id;
         if (!name || !id) continue;
-        toolByCallId.set(id, name);
+        let args = {};
+        try {
+          args =
+            typeof toolCall?.function?.arguments === "string"
+              ? JSON.parse(toolCall.function.arguments)
+              : toolCall?.function?.arguments || {};
+        } catch {
+          args = {};
+        }
+        toolByCallId.set(id, {
+          id,
+          name,
+          args,
+          result: null,
+        });
         usedNames.push(name);
       }
       continue;
     }
     if (msg?.role === "tool" && msg.tool_call_id) {
-      const name = toolByCallId.get(msg.tool_call_id);
-      if (!name) continue;
+      const call = toolByCallId.get(msg.tool_call_id);
+      if (!call?.name) continue;
+      let parsedResult = {};
       try {
-        lastResultByName.set(name, JSON.parse(msg.content || "{}"));
+        parsedResult = JSON.parse(msg.content || "{}");
       } catch {
-        lastResultByName.set(name, {});
+        parsedResult = {};
       }
+      call.result = parsedResult;
+      lastResultByName.set(call.name, parsedResult);
     }
   }
+  const usedCalls = Array.from(toolByCallId.values());
   return {
     usedNames,
+    usedCalls,
     hasUsed(name) {
       return usedNames.includes(name);
     },
+    hasUsedCall(predicate) {
+      if (typeof predicate !== "function") return false;
+      return usedCalls.some((call) => predicate(call));
+    },
     lastResult(name) {
       return lastResultByName.get(name);
+    },
+    lastCall(name) {
+      for (let i = usedCalls.length - 1; i >= 0; i -= 1) {
+        if (usedCalls[i]?.name === name) return usedCalls[i];
+      }
+      return null;
     },
   };
 }
 
 function buildServerCompletionGuard(userContent) {
+  const localMachineTask = classifyLocalMachineInfoTask(userContent);
+  if (localMachineTask) {
+    return ({ payload }) => {
+      const loopState = inspectToolLoopMessages(payload?.messages || []);
+      const missing = [];
+      if (
+        localMachineTask.wantsLocalIp &&
+        !loopState.hasUsedCall(
+          (call) =>
+            call?.name === "run_command" &&
+            matchesCommandHint(call?.args?.command, "hostname -i")
+        )
+      ) {
+        missing.push("the local IP");
+      }
+      if (
+        localMachineTask.wantsTailscaleIp &&
+        !loopState.hasUsedCall(
+          (call) =>
+            call?.name === "run_command" &&
+            matchesCommandHint(call?.args?.command, TAILSCALE_IPV4_COMMAND)
+        )
+      ) {
+        missing.push("the Tailscale IP");
+      }
+      if (
+        localMachineTask.wantsHostname &&
+        !loopState.hasUsedCall(
+          (call) =>
+            call?.name === "run_command" &&
+            matchesCommandHint(call?.args?.command, HOSTNAME_COMMAND, {
+              exact: true,
+            })
+        )
+      ) {
+        missing.push("the hostname");
+      }
+      if (missing.length === 0) return null;
+      return {
+        block: true,
+        phase: "execute",
+        note:
+          `[System note] You still need to gather ${missing.join(" and ")}. ` +
+          "Call the next tool now before the final response.",
+      };
+    };
+  }
+
   const task = classifyProcessTask(userContent);
   if (!task) return null;
   const expectedHost = task.host;
@@ -2610,6 +2701,7 @@ async function handleChat(req, res) {
 
     const isWebLookup = Boolean(config.webSearchEnabled) && looksLikeWebLookupRequest(userContent);
     const processTask = classifyProcessTask(userContent);
+    const localMachineTask = classifyLocalMachineInfoTask(userContent);
 
     const requiresTool = (() => {
       const text = userContent.toLowerCase();
@@ -2625,6 +2717,7 @@ async function handleChat(req, res) {
       if (/\b(?:inspect|explore|scan|review|look\s+through|go\s+through)\b/.test(text) && /\b(?:file|files|folder|directory|project|repo|repository|codebase|source|structure)\b/.test(text)) return true;
       if (/\b(?:see|understand|inspect|explore)\s+(?:how\s+(?:you|it)\s+work|yourself|your\s+own\s+(?:files|code|project|repo|repository|structure))\b/.test(text)) return true;
       if (/\bfile\s+structure\b/.test(text)) return true;
+      if (localMachineTask) return true;
       if (processTask) return true;
       if (/\b(?:create|build|scaffold|set\s*up|initialize|init)\s+(?:a\s+)?(?:new\s+)?(?:project|app|application|website|site|repo|repository)\b/.test(text)) return true;
       if (/\b(?:install|add|remove|uninstall)\s+\w/.test(text) && /\b(?:package|dependency|dep|lib|library|module|shadcn|tailwind|prisma|next|react|vue|express)\b/.test(text)) return true;
@@ -2719,6 +2812,58 @@ async function handleChat(req, res) {
       const repoStatusLike =
         /\b(?:show|check|review)\s+(?:me\s+)?(?:the\s+)?(?:latest|recent|current)\s+(?:changes|status)\b/.test(text) ||
         /\bgit\s+(?:status|diff|log)\b/.test(text);
+
+      if (localMachineTask) {
+        const loopState = inspectToolLoopMessages(_payload?.messages || []);
+        if (
+          localMachineTask.wantsLocalIp &&
+          !loopState.hasUsedCall(
+            (call) =>
+              call?.name === "run_command" &&
+              matchesCommandHint(call?.args?.command, "hostname -i")
+          )
+        ) {
+          return {
+            name: "run_command",
+            arguments: {
+              command: LOCAL_IP_COMMAND,
+            },
+          };
+        }
+        if (
+          localMachineTask.wantsTailscaleIp &&
+          !loopState.hasUsedCall(
+            (call) =>
+              call?.name === "run_command" &&
+              matchesCommandHint(call?.args?.command, TAILSCALE_IPV4_COMMAND)
+          )
+        ) {
+          return {
+            name: "run_command",
+            arguments: {
+              command: TAILSCALE_IPV4_COMMAND,
+            },
+          };
+        }
+        if (
+          localMachineTask.wantsHostname &&
+          !loopState.hasUsedCall(
+            (call) =>
+              call?.name === "run_command" &&
+              matchesCommandHint(call?.args?.command, HOSTNAME_COMMAND, {
+                exact: true,
+              })
+          )
+        ) {
+          return {
+            name: "run_command",
+            arguments: {
+              command: HOSTNAME_COMMAND,
+            },
+          };
+        }
+        return null;
+      }
 
       if (isWebLookup) {
         const urlMatch = userContent.match(/https?:\/\/[^\s)]+/i);
@@ -2918,6 +3063,13 @@ async function handleChat(req, res) {
         0
       );
 
+    const activeModel = config.modelRoles?.assistant || config.model;
+    const isQwenCoder = isQwenCoderModel(activeModel);
+    const usePromptOnlyTools = shouldUsePromptOnlyTools({
+      endpoint: config.endpoint,
+      modelName: activeModel,
+    });
+
     // Build LLM payload with Qwen3-recommended sampling parameters
     const payload = {
       messages: fullMessages,
@@ -2934,7 +3086,6 @@ async function handleChat(req, res) {
       payload.min_p = config.min_p;
     }
 
-    const activeModel = config.modelRoles?.assistant || config.model;
     if (activeModel) payload.model = activeModel;
     if (config.statelessProvider) {
       payload.cache_prompt = false;
@@ -2947,10 +3098,31 @@ async function handleChat(req, res) {
 
     // Add tool definitions if available
     const allToolDefs = registry.getDefinitions();
+    const qwenForcedTools = (() => {
+      const forced = new Set();
+      if (localMachineTask) forced.add("run_command");
+      if (processTask) {
+        forced.add("list_processes");
+        if (processTask.intent === "stop") {
+          forced.add("kill_process");
+        } else {
+          forced.add("start_dev_server");
+          forced.add("verify_server");
+        }
+      }
+      if (isWebLookup) {
+        forced.add("web_search");
+        forced.add("fetch_url");
+      }
+      if (isGitRequest) forced.add("run_command");
+      return Array.from(forced);
+    })();
     const toolDefs = isPureWebLookup
       ? allToolDefs.filter((tool) =>
           ["web_search", "fetch_url"].includes(tool?.function?.name || "")
         )
+      : isQwenCoder
+        ? registry.selectDefinitions(userContent, 8, qwenForcedTools)
       : allToolDefs;
     const isConversational =
       !requiresTool &&
@@ -2962,8 +3134,50 @@ async function handleChat(req, res) {
         userContent
       );
 
-    if (toolDefs.length > 0 && !isConversational) {
+    if (toolDefs.length > 0 && !isConversational && !usePromptOnlyTools) {
       payload.tools = toolDefs;
+      if (isQwenCoder) {
+        payload.tool_choice = "auto";
+      }
+    }
+    if (requiresTool) {
+      const executionPlan = buildExecutionPlan({
+        userContent,
+        toolGuide: registry.buildToolGuide(userContent, 4),
+        isWebLookup,
+        processTask,
+        localMachineTask,
+        isGitRequest,
+        isReadOnlyFsRequest,
+        explicitProjectDir: inferProjectDirectory(userContent, config),
+        recentProjectDir: inferRecentProjectDirectory(history, config),
+      });
+      const planNote = formatExecutionPlanNote(executionPlan);
+      if (planNote) {
+        payload.messages.push({
+          role: "user",
+          content: planNote,
+        });
+        await logEvent("execution_plan", {
+          conversationId,
+          steps: executionPlan.steps,
+        });
+        updateChatProgress(
+          conversationId,
+          "running",
+          `Plan ready: ${executionPlan.steps.join(" ")}`,
+          { kind: "plan", phase: "ready" }
+        );
+      }
+    }
+    if (isQwenCoder && toolDefs.length > 0 && !isConversational) {
+      const qwenToolPrompt = buildQwenXmlToolSystemMessage(toolDefs);
+      if (qwenToolPrompt) {
+        payload.messages.splice(1, 0, {
+          role: "system",
+          content: qwenToolPrompt,
+        });
+      }
     }
     await logEvent("tools_available", {
       conversationId,
@@ -2975,6 +3189,9 @@ async function handleChat(req, res) {
     const llmStartedAt = Date.now();
     let llmCallCount = 0;
     let lastLlmResponse = null;
+    let llmPayloadCompatState = {
+      disabledParams: [],
+    };
     const callLLM = async (nextPayload) => {
       llmCallCount += 1;
       updateChatProgress(
@@ -2984,17 +3201,52 @@ async function handleChat(req, res) {
         { kind: "llm", phase: "running" }
       );
       try {
+        const effectivePayload =
+          llmPayloadCompatState.disabledParams.length > 0
+            ? stripUnsupportedPayloadParams(
+                nextPayload,
+                llmPayloadCompatState.disabledParams
+              )
+            : nextPayload;
         const upstream = await fetchWithTimeout(
           config.endpoint,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(nextPayload),
+            body: JSON.stringify(effectivePayload),
           },
           120_000
         );
         if (!upstream.ok) {
           const errorText = await upstream.text();
+          const unsupportedParams = extractUnsupportedPayloadParams(errorText);
+          if (unsupportedParams.length > 0) {
+            const nextDisabled = Array.from(
+              new Set([
+                ...llmPayloadCompatState.disabledParams,
+                ...unsupportedParams,
+              ])
+            );
+            const changed =
+              nextDisabled.length !== llmPayloadCompatState.disabledParams.length;
+            if (changed) {
+              llmPayloadCompatState = {
+                disabledParams: nextDisabled,
+              };
+              await logEvent("llm_payload_compat_retry", {
+                conversationId,
+                disabledParams: nextDisabled,
+                errorText: errorText.slice(0, 1000),
+              });
+              updateChatProgress(
+                conversationId,
+                "running",
+                `LLM compatibility retry without: ${nextDisabled.join(", ")}`,
+                { kind: "llm", phase: "compat_retry" }
+              );
+              return await callLLM(nextPayload);
+            }
+          }
           throw new Error(`LLM server error: ${upstream.status} ${errorText}`);
         }
         const data = await upstream.json();
@@ -3035,6 +3287,20 @@ async function handleChat(req, res) {
         "Continue the tool loop until the task is complete and verified. " +
         "If you say you will inspect or check something, immediately continue with the next tool call."
       );
+      systemNotes.push(
+        "When calling a tool, use the exact <tool_call>{\"name\":\"tool_name\",\"arguments\":{...}}</tool_call> format with no markdown and no trailing text."
+      );
+      if (usePromptOnlyTools) {
+        systemNotes.push(
+          "You are running behind llama.cpp. Prefer prompt-directed XML tool calls instead of relying on native OpenAI tool fields."
+        );
+      }
+    }
+    if (requiresTool && localMachineTask) {
+      systemNotes.push(
+        "This is a local machine info task. Use run_command to collect each requested value. " +
+        "Do not stop after the first value if the user asked for more than one."
+      );
     }
     if (requiresTool && processTask) {
       systemNotes.push(
@@ -3069,21 +3335,29 @@ async function handleChat(req, res) {
       ? Math.min(effectiveMaxRounds, 3)
       : effectiveMaxRounds;
     const completionGuard = buildServerCompletionGuard(userContent);
-    const buildVerifyPrompt = isPureWebLookup
-      ? ({ hasErrors, toolCalls, defaultPrompt }) => {
-          if (hasErrors) return defaultPrompt;
-          const toolNames = (Array.isArray(toolCalls) ? toolCalls : [])
-            .map((toolCall) => toolCall?.function?.name)
-            .filter(Boolean);
-          if (toolNames.includes("fetch_url")) {
-            return "[System note] Use the fetched page text to answer the user now. Only fetch another page if this page is clearly insufficient.";
-          }
-          if (toolNames.includes("web_search")) {
-            return "[System note] Use these search results to answer the user now. Only call fetch_url if one result needs more detail.";
-          }
-          return defaultPrompt;
+    const buildVerifyPrompt = ({ hasErrors, toolCalls, toolResults, defaultPrompt }) => {
+      let prompt = defaultPrompt;
+      if (isPureWebLookup && !hasErrors) {
+        const toolNames = (Array.isArray(toolCalls) ? toolCalls : [])
+          .map((toolCall) => toolCall?.function?.name)
+          .filter(Boolean);
+        if (toolNames.includes("fetch_url")) {
+          prompt =
+            "[System note] Use the fetched page text to answer the user now. Only fetch another page if this page is clearly insufficient.";
+        } else if (toolNames.includes("web_search")) {
+          prompt =
+            "[System note] Use these search results to answer the user now. Only call fetch_url if one result needs more detail.";
         }
-      : null;
+      }
+      if (isQwenCoder) {
+        return buildQwenToolContinuationPrompt({
+          toolCalls,
+          toolResults,
+          defaultPrompt: prompt,
+        });
+      }
+      return prompt;
+    };
     const toolCallGuard = isPureWebLookup
       ? ({ payload: nextPayload, message }) => {
           const requestedToolNames = (Array.isArray(message?.tool_calls) ? message.tool_calls : [])

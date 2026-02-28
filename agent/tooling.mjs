@@ -488,6 +488,54 @@ export class ToolRegistry {
     }));
   }
 
+  selectDefinitions(userContent, maxTools = 8, forceInclude = []) {
+    const forced = new Set(
+      Array.isArray(forceInclude) ? forceInclude.filter(Boolean) : []
+    );
+    const tokens = tokenize(userContent);
+    const scored = this.list().map((tool) => {
+      let score = forced.has(tool.name) ? 100 : 0;
+      const haystack = `${tool.name} ${tool.description}`.toLowerCase();
+      for (const token of tokens) {
+        if (haystack.includes(token)) score += 1.2;
+        if (tool.keywords.some((kw) => kw.toLowerCase().includes(token))) {
+          score += 2;
+        }
+      }
+      return { tool, score };
+    });
+
+    const selected = scored
+      .filter((entry) => entry.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, clampNumber(Number(maxTools), 1, 32, 8))
+      .map((entry) => entry.tool);
+
+    for (const tool of this.list()) {
+      if (forced.has(tool.name) && !selected.some((entry) => entry.name === tool.name)) {
+        selected.push(tool);
+      }
+    }
+
+    const unique = [];
+    const seen = new Set();
+    for (const tool of selected) {
+      if (!tool?.name || seen.has(tool.name)) continue;
+      seen.add(tool.name);
+      unique.push(tool);
+    }
+
+    const fallback = unique.length > 0 ? unique : this.list();
+    return fallback.map((tool) => ({
+      type: "function",
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+      },
+    }));
+  }
+
   async execute(name, args) {
     const tool = this.tools.get(name);
     if (!tool) return { error: `Unknown tool: ${name}. Available tools: ${[...this.tools.keys()].join(", ")}` };
