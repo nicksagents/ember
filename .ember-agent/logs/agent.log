@@ -8,3 +8,6 @@
 ==== Ember start 2026-02-26T22:03:43.606Z ====
 
 ==== Ember start 2026-02-26T22:05:42.603Z ====
+
+==== Ember start 2026-02-28T06:36:31.894Z ====
+[agent] listen error: listen EPERM: operation not permitted 127.0.0.1:4317

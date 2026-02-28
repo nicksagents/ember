@@ -8,3 +8,19 @@
 ==== Ember start 2026-02-26T22:03:43.607Z ====
 
 ==== Ember start 2026-02-26T22:05:42.604Z ====
+
+==== Ember start 2026-02-28T06:36:31.895Z ====
+
+> local-agent@0.1.0 dev
+> next dev -p 3005 -H 127.0.0.1
+
+⨯ Failed to start server
+Error: listen EPERM: operation not permitted 127.0.0.1:3005
+    at <unknown> (Error: listen EPERM: operation not permitted 127.0.0.1:3005) {
+  code: 'EPERM',
+  errno: -1,
+  syscall: 'listen',
+  address: '127.0.0.1',
+  port: 3005
+}
+[?25h

@@ -273,7 +273,7 @@ async function main() {
   writeAt(ROW.message, "  Starting web UI...");
   uiProcess = spawn(
     npmCmd,
-    ["run", "dev", "--", "-p", String(UI_PORT), "-H", uiHost],
+    ["run", "dev", "--", "--webpack", "-p", String(UI_PORT), "-H", uiHost],
     {
     cwd: projectRoot,
     stdio: ["ignore", "pipe", "pipe"],
