@@ -11,6 +11,147 @@ function tokenize(text) {
     .filter((token) => token.length > 2);
 }
 
+function analyzeToolIntent(userContent) {
+  const text = String(userContent || "").toLowerCase();
+  const tokens = tokenize(userContent);
+  const hasUrl = /https?:\/\/[^\s]+/.test(text);
+  const mentionsPath =
+    /(?:^|\s)(?:~\/|\.\/|\/[a-z0-9_.-]|[a-z]:[\\/])/i.test(String(userContent || ""));
+  const wantsShell =
+    /\b(?:run|execute|shell|bash|terminal|command|cli|script)\b/.test(text);
+  const wantsBuildOrTest = /\b(?:build|test|lint|npm|pnpm|yarn|npx)\b/.test(text);
+  const wantsGit = /\b(?:git|github|repo|repository|commit|push|pull|branch|clone)\b/.test(text);
+  const wantsWeb = /\b(?:web|internet|search|lookup|google|news|online)\b/.test(text);
+  const wantsFetchUrl =
+    hasUrl || /\b(?:fetch|open|read|visit|scrape)\b/.test(text) && /\b(?:url|page|site|website|webpage)\b/.test(text);
+  const wantsProcess = /\b(?:process|pid|port|running|listen(?:ing)?|server)\b/.test(text);
+  const wantsStop = /\b(?:kill|stop|terminate)\b/.test(text);
+  const wantsStart = /\b(?:start|run|launch|boot|serve)\b/.test(text);
+  const wantsVerify = /\b(?:verify|check|health|responding|reachable|working)\b/.test(text);
+  const wantsListDir = /\b(?:list|show|tree|browse|contents?|files?|folders?|directories?)\b/.test(text);
+  const wantsReadFile =
+    /\b(?:read|open|view|show|inspect|cat)\b/.test(text) &&
+    (/\bfile\b/.test(text) || mentionsPath);
+  const wantsWriteFile =
+    /\b(?:write|save|create|edit|update|modify|append|replace|change|fix|patch)\b/.test(text) &&
+    (/\bfile\b/.test(text) || mentionsPath);
+  const wantsDelete = /\b(?:delete|remove|rm|unlink)\b/.test(text);
+  const wantsMove = /\b(?:move|rename|mv)\b/.test(text);
+  const wantsCopy = /\b(?:copy|duplicate|cp)\b/.test(text);
+  const wantsStat =
+    /\b(?:exists?|stat|metadata|size|mtime|path)\b/.test(text) &&
+    (mentionsPath || /\bfile\b|\bfolder\b|\bdirectory\b/.test(text));
+  const wantsMemory = /\bmemory|remember|recall\b/.test(text);
+  const wantsPlanning = /\b(?:plan|todo|task|steps|progress|checklist)\b/.test(text);
+
+  return {
+    text,
+    tokens,
+    hasUrl,
+    mentionsPath,
+    wantsShell,
+    wantsBuildOrTest,
+    wantsGit,
+    wantsWeb,
+    wantsFetchUrl,
+    wantsProcess,
+    wantsStop,
+    wantsStart,
+    wantsVerify,
+    wantsListDir,
+    wantsReadFile,
+    wantsWriteFile,
+    wantsDelete,
+    wantsMove,
+    wantsCopy,
+    wantsStat,
+    wantsMemory,
+    wantsPlanning,
+  };
+}
+
+function scoreToolForIntent(tool, intent, forced) {
+  let score = forced.has(tool.name) ? 100 : 0;
+  const haystack = `${tool.name} ${tool.description}`.toLowerCase();
+  for (const token of intent.tokens) {
+    if (haystack.includes(token)) score += 1.2;
+    if (tool.keywords.some((kw) => kw.toLowerCase().includes(token))) {
+      score += 2;
+    }
+  }
+
+  const name = tool.name;
+  if (name === "run_command") {
+    if (intent.wantsShell || intent.wantsBuildOrTest || intent.wantsGit) score += 8;
+    if (
+      intent.wantsListDir ||
+      intent.wantsReadFile ||
+      intent.wantsWriteFile ||
+      intent.wantsDelete ||
+      intent.wantsMove ||
+      intent.wantsCopy ||
+      intent.wantsStat ||
+      intent.wantsProcess ||
+      intent.wantsWeb
+    ) {
+      score -= 4;
+    }
+  }
+  if (name === "list_dir" && intent.wantsListDir) score += 8;
+  if (name === "read_file" && intent.wantsReadFile) score += 9;
+  if (name === "write_file" && intent.wantsWriteFile) score += 9;
+  if (name === "remove_path" && intent.wantsDelete) score += 9;
+  if (name === "move_path" && intent.wantsMove) score += 9;
+  if (name === "copy_path" && intent.wantsCopy) score += 9;
+  if (name === "stat_path" && intent.wantsStat) score += 8;
+  if (name === "web_search" && intent.wantsWeb) score += 8;
+  if (name === "fetch_url" && intent.wantsFetchUrl) score += 9;
+  if (name === "list_processes" && intent.wantsProcess) score += 9;
+  if (name === "kill_process" && intent.wantsProcess && intent.wantsStop) score += 11;
+  if (name === "start_dev_server" && intent.wantsProcess && intent.wantsStart) score += 11;
+  if (name === "verify_server" && intent.wantsProcess && intent.wantsVerify) score += 11;
+  if (name === "github_repo" && intent.wantsGit) score += 10;
+  if (name === "search_memory" && intent.wantsMemory) score += 7;
+  if ((name === "save_memory" || name === "update_memory") && intent.wantsMemory) score += 6;
+  if (name === "task_manager" && intent.wantsPlanning) score += 8;
+
+  // Penalize fetch_url when the user did not supply a URL or ask for a page.
+  if (name === "fetch_url" && !intent.wantsFetchUrl) score -= 5;
+  // Prefer specialized fs tools over shell unless the user explicitly asked for shell.
+  if (
+    name === "run_command" &&
+    !intent.wantsShell &&
+    !intent.wantsBuildOrTest &&
+    !intent.wantsGit &&
+    (intent.wantsListDir ||
+      intent.wantsReadFile ||
+      intent.wantsWriteFile ||
+      intent.wantsDelete ||
+      intent.wantsMove ||
+      intent.wantsCopy ||
+      intent.wantsStat)
+  ) {
+    score -= 6;
+  }
+
+  return score;
+}
+
+function getFallbackToolNames(intent) {
+  if (intent.wantsWeb) return ["web_search", "fetch_url"];
+  if (intent.wantsGit) return ["github_repo", "run_command"];
+  if (intent.wantsProcess && intent.wantsStop) return ["list_processes", "kill_process", "verify_server"];
+  if (intent.wantsProcess) return ["list_processes", "start_dev_server", "verify_server"];
+  if (intent.wantsWriteFile || intent.wantsDelete || intent.wantsMove || intent.wantsCopy) {
+    return ["read_file", "write_file", "list_dir", "stat_path", "run_command"];
+  }
+  if (intent.wantsReadFile || intent.wantsListDir || intent.wantsStat || intent.mentionsPath) {
+    return ["read_file", "list_dir", "stat_path", "run_command"];
+  }
+  if (intent.wantsPlanning) return ["task_manager", "read_file", "list_dir"];
+  return ["read_file", "list_dir", "stat_path", "run_command"];
+}
+
 function clampNumber(value, min, max, fallback) {
   if (typeof value !== "number" || Number.isNaN(value)) return fallback;
   return Math.min(Math.max(value, min), max);
@@ -492,17 +633,9 @@ export class ToolRegistry {
     const forced = new Set(
       Array.isArray(forceInclude) ? forceInclude.filter(Boolean) : []
     );
-    const tokens = tokenize(userContent);
+    const intent = analyzeToolIntent(userContent);
     const scored = this.list().map((tool) => {
-      let score = forced.has(tool.name) ? 100 : 0;
-      const haystack = `${tool.name} ${tool.description}`.toLowerCase();
-      for (const token of tokens) {
-        if (haystack.includes(token)) score += 1.2;
-        if (tool.keywords.some((kw) => kw.toLowerCase().includes(token))) {
-          score += 2;
-        }
-      }
-      return { tool, score };
+      return { tool, score: scoreToolForIntent(tool, intent, forced) };
     });
 
     const selected = scored
@@ -514,6 +647,16 @@ export class ToolRegistry {
     for (const tool of this.list()) {
       if (forced.has(tool.name) && !selected.some((entry) => entry.name === tool.name)) {
         selected.push(tool);
+      }
+    }
+
+    if (selected.length === 0) {
+      const fallbackNames = getFallbackToolNames(intent);
+      for (const name of fallbackNames) {
+        const tool = this.tools.get(name);
+        if (tool && !selected.some((entry) => entry.name === tool.name)) {
+          selected.push(tool);
+        }
       }
     }
 
@@ -574,20 +717,12 @@ export class ToolRegistry {
   }
 
   buildToolGuide(userContent, maxTools = 4) {
-    const tokens = tokenize(userContent);
-    if (tokens.length === 0) return "";
+    const intent = analyzeToolIntent(userContent);
+    if (intent.tokens.length === 0) return "";
 
     const scored = this.list()
       .map((tool) => {
-        let score = 0;
-        const haystack = `${tool.name} ${tool.description}`.toLowerCase();
-        for (const token of tokens) {
-          if (haystack.includes(token)) score += 1.2;
-          if (tool.keywords.some((kw) => kw.toLowerCase().includes(token))) {
-            score += 2;
-          }
-        }
-        return { tool, score };
+        return { tool, score: scoreToolForIntent(tool, intent, new Set()) };
       })
       .filter((entry) => entry.score > 0)
       .sort((a, b) => b.score - a.score)

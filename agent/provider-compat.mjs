@@ -19,10 +19,10 @@ export function isLikelyLlamaCppEndpoint(endpoint) {
   }
 }
 
-export function shouldUsePromptOnlyTools({ endpoint, modelName }) {
-  return isLikelyLlamaCppEndpoint(endpoint) &&
-    safeLower(modelName).includes("qwen") &&
-    safeLower(modelName).includes("coder");
+export function shouldUsePromptOnlyTools() {
+  // Prefer native OpenAI-style tools first. If the upstream llama.cpp build
+  // rejects tool fields, the compat retry path strips them automatically.
+  return false;
 }
 
 export function extractUnsupportedPayloadParams(errorText) {

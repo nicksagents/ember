@@ -67,6 +67,18 @@ test("buildQwenToolContinuationPrompt includes tool results and exact format rem
   assert.ok(prompt.includes("Do NOT use ```bash blocks"));
 });
 
+test("buildQwenToolContinuationPrompt supports native tool mode", () => {
+  const prompt = buildQwenToolContinuationPrompt({
+    toolCalls: [],
+    toolResults: [],
+    defaultPrompt: "[System note] Continue.",
+    toolStyle: "native",
+  });
+
+  assert.ok(prompt.includes("provided tool interface"));
+  assert.ok(!prompt.includes("<tool_call>"));
+});
+
 test("ToolRegistry.selectDefinitions narrows tool set to relevant tools", () => {
   const registry = new ToolRegistry();
   registry.register({
@@ -99,4 +111,38 @@ test("ToolRegistry.selectDefinitions narrows tool set to relevant tools", () => 
   const names = defs.map((def) => def.function.name);
   assert.ok(names.includes("run_command"));
   assert.equal(names.length <= 2, true);
+});
+
+test("ToolRegistry.selectDefinitions prefers specialized filesystem tools over run_command", () => {
+  const registry = new ToolRegistry();
+  registry.register({
+    name: "run_command",
+    description: "Run a shell command.",
+    parameters: { type: "object", properties: {} },
+    keywords: ["run", "command", "shell"],
+    handler: async () => ({}),
+  });
+  registry.register({
+    name: "read_file",
+    description: "Read a file.",
+    parameters: { type: "object", properties: {} },
+    keywords: ["read", "file", "open", "view"],
+    handler: async () => ({}),
+  });
+  registry.register({
+    name: "list_dir",
+    description: "List a directory.",
+    parameters: { type: "object", properties: {} },
+    keywords: ["list", "directory", "folder", "files"],
+    handler: async () => ({}),
+  });
+
+  const defs = registry.selectDefinitions(
+    "read the package.json file and show me the folder contents",
+    2
+  );
+  const names = defs.map((def) => def.function.name);
+  assert.ok(names.includes("read_file"));
+  assert.ok(names.includes("list_dir"));
+  assert.ok(!names.includes("run_command"));
 });

@@ -96,6 +96,7 @@ export function buildQwenToolContinuationPrompt({
   toolCalls = [],
   toolResults = [],
   defaultPrompt = "",
+  toolStyle = "xml",
 }) {
   const lines = [];
   const callNames = Array.isArray(toolCalls)
@@ -115,10 +116,24 @@ export function buildQwenToolContinuationPrompt({
   if (defaultPrompt) {
     lines.push(defaultPrompt);
   }
+<<<<<<< HEAD
   lines.push(
     "If there are more steps to complete, call the next tool NOW using <tool_call>{\"name\":\"...\",\"arguments\":{...}}</tool_call>. " +
     "Only give your final answer when ALL requested steps are done. " +
     "Do NOT describe what you will do. Do NOT use ```bash blocks. Do NOT claim success until verified."
   );
+=======
+  if (toolStyle === "xml") {
+    lines.push(
+      "Next step: call a tool using <tool_call>{\"name\":\"...\",\"arguments\":{...}}</tool_call> or give your final answer. " +
+      "Do NOT describe what you will do. Do NOT use ```bash blocks."
+    );
+  } else {
+    lines.push(
+      "Next step: either call the next tool using the provided tool interface or give your final answer. " +
+      "Do NOT narrate future actions. Do NOT use ```bash blocks."
+    );
+  }
+>>>>>>> 75f29ea9e5e4921d67d7933482496f71807a9944
   return lines.filter(Boolean).join("\n\n");
 }
