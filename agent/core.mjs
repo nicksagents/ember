@@ -1,7 +1,7 @@
 const DEFAULT_MAX_MEMORY_ITEMS = 10;
 const DEFAULT_MAX_MEMORY_CHARS = 800;
 const DEFAULT_CONTEXT_LIMIT = 40;
-const DEFAULT_MAX_TOOL_ROUNDS = 20;
+const DEFAULT_MAX_TOOL_ROUNDS = 28;
 const DEFAULT_MEMORY_LIMIT = 5;
 const DEFAULT_MAX_PINNED = 2;
 const DEFAULT_MEMORY_MAX_AGE_DAYS = 180;
@@ -15,7 +15,7 @@ const DEFAULT_USAGE_BOOST_MAX = 1.5;
 const DEFAULT_MAX_TOOL_RESULT_CHARS = 8000;
 const DEFAULT_MAX_LIST_DIR_ENTRIES = 200;
 const DEFAULT_MAX_TOOL_STREAM_CHARS = 4000;
-const TOOL_LOOP_MESSAGE_LIMIT = 20;
+const TOOL_LOOP_MESSAGE_LIMIT = 32;
 const STOPWORDS = new Set([
   "the",
   "and",
@@ -135,7 +135,7 @@ export function sanitizeConfigInput(input) {
     safe.max_tokens = clampNumber(input.max_tokens, 64, 8192, 2048);
   }
   if (typeof input.maxToolRounds === "number") {
-    safe.maxToolRounds = clampNumber(input.maxToolRounds, 1, 50, 20);
+    safe.maxToolRounds = clampNumber(input.maxToolRounds, 1, 80, 28);
   }
   if (typeof input.lightweightMode === "boolean") {
     safe.lightweightMode = input.lightweightMode;

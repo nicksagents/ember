@@ -22,13 +22,13 @@ test("isLikelyLlamaCppEndpoint detects default local llama-server endpoint", () 
   );
 });
 
-test("shouldUsePromptOnlyTools enables llama.cpp prompt-only mode for qwen coder", () => {
+test("shouldUsePromptOnlyTools prefers native tool calling for qwen coder", () => {
   assert.equal(
     shouldUsePromptOnlyTools({
       endpoint: "http://localhost:8080/v1/chat/completions",
       modelName: "Qwen3-Coder-30B-A3B-Instruct-Q6_K.gguf",
     }),
-    true
+    false
   );
   assert.equal(
     shouldUsePromptOnlyTools({

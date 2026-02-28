@@ -78,11 +78,11 @@ const REQUEST_TIMEOUT_MS = Number.parseInt(
 const EMBEDDINGS_ENDPOINT = process.env.EMBER_EMBEDDINGS_ENDPOINT || "";
 let _chatRequestCount = 0;
 const MEMORY_MAINTENANCE_INTERVAL = 10;
-const SUMMARY_KEEP_MESSAGES = 16;
+const SUMMARY_KEEP_MESSAGES = 24;
 const SUMMARY_MIN_MESSAGES = 6;
 const SUMMARY_MAX_INPUT_CHARS = 6000;
 const SUMMARY_MAX_OUTPUT_CHARS = 800;
-const CONTEXT_CHAR_BUDGET = 18000;
+const CONTEXT_CHAR_BUDGET = 36000;
 const CHAT_PROGRESS_TTL_MS = 15 * 60 * 1000;
 const CHAT_PROGRESS_MAX_STEPS = 60;
 
@@ -181,10 +181,10 @@ const DEFAULT_CONFIG = {
   top_k: 20,
   min_p: 0.05,
   repetition_penalty: 1.05,
-  max_tokens: 2048,
+  max_tokens: 3072,
   statelessProvider: true,
-  lightweightMode: true,
-  maxToolRounds: 20,
+  lightweightMode: false,
+  maxToolRounds: 28,
   unrestrictedShell: false,
   webSearchEnabled: true,
   workspaceRoot: getWorkspaceDefaults().workspaceRoot,
@@ -209,6 +209,25 @@ const DEFAULT_CORE_PROMPT = [
   "Save memories only for durable user preferences or identity facts.",
 ].join("\n");
 const DEFAULT_SOUL_MD = "You are funny, concise, and helpful.";
+
+function upgradeLegacyConfig(parsed) {
+  const next = parsed && typeof parsed === "object" ? { ...parsed } : {};
+
+  // These values were previously hidden defaults, not explicit settings in the
+  // UI. Upgrade them in memory so existing installs benefit from improved Qwen
+  // tuning without manual config surgery.
+  if (next.max_tokens === 2048) {
+    next.max_tokens = DEFAULT_CONFIG.max_tokens;
+  }
+  if (next.maxToolRounds === 20) {
+    next.maxToolRounds = DEFAULT_CONFIG.maxToolRounds;
+  }
+  if (next.lightweightMode === true) {
+    next.lightweightMode = DEFAULT_CONFIG.lightweightMode;
+  }
+
+  return next;
+}
 
 // ── File helpers ────────────────────────────────────────────────────────────
 
@@ -425,6 +444,7 @@ async function loadConfig(overrides) {
   } catch {
     parsed = {};
   }
+  parsed = upgradeLegacyConfig(parsed);
   const workspaceDefaults = getWorkspaceDefaults();
   return {
     ...DEFAULT_CONFIG,
@@ -3160,7 +3180,7 @@ async function handleChat(req, res) {
     // For Qwen models during tool-requiring tasks, cap response length to
     // prevent long narratives and force concise tool-call output
     if (isQwenCoder && requiresTool) {
-      payload.max_tokens = Math.min(payload.max_tokens || 2048, 768);
+      payload.max_tokens = Math.min(payload.max_tokens || 3072, 1536);
     }
     if (typeof config.min_p === "number" && config.min_p > 0) {
       payload.min_p = config.min_p;
@@ -3202,7 +3222,7 @@ async function handleChat(req, res) {
           ["web_search", "fetch_url"].includes(tool?.function?.name || "")
         )
       : isQwenCoder
-        ? registry.selectDefinitions(userContent, 8, qwenForcedTools)
+        ? registry.selectDefinitions(userContent, 12, qwenForcedTools)
       : allToolDefs;
     const isConversational =
       !requiresTool &&
@@ -3250,7 +3270,7 @@ async function handleChat(req, res) {
         );
       }
     }
-    if (isQwenCoder && toolDefs.length > 0 && !isConversational) {
+    if (usePromptOnlyTools && isQwenCoder && toolDefs.length > 0 && !isConversational) {
       const qwenToolPrompt = buildQwenXmlToolSystemMessage(toolDefs);
       if (qwenToolPrompt) {
         payload.messages.splice(1, 0, {
@@ -3362,15 +3382,20 @@ async function handleChat(req, res) {
       );
     }
     if (requiresTool && isQwenCoderModel(activeModel)) {
-      systemNotes.push(
-        "CRITICAL: Call tools using <tool_call>{\"name\":\"...\",\"arguments\":{...}}</tool_call>. " +
-        "NEVER use ```bash blocks. NEVER fabricate command output. " +
-        "NEVER stop after saying what you will do -- call the tool NOW. " +
-        "Continue the tool loop until the task is complete and verified."
-      );
       if (usePromptOnlyTools) {
         systemNotes.push(
-          "You run on llama.cpp. Use XML <tool_call> format only."
+          "CRITICAL: Call tools using <tool_call>{\"name\":\"...\",\"arguments\":{...}}</tool_call>. " +
+          "NEVER use ```bash blocks. NEVER fabricate command output. " +
+          "NEVER stop after saying what you will do -- call the tool NOW. " +
+          "Continue the tool loop until the task is complete and verified. " +
+          "You run on llama.cpp prompt-only tools, so use XML <tool_call> format only."
+        );
+      } else {
+        systemNotes.push(
+          "CRITICAL: Use the provided tool interface directly when a tool is needed. " +
+          "Do not write bash blocks, fake tool output, or plain-text JSON tool calls. " +
+          "Use specialized tools before run_command when one matches the task. " +
+          "Continue the tool loop until the task is complete and verified."
         );
       }
     }
@@ -3407,7 +3432,7 @@ async function handleChat(req, res) {
         ? config.maxToolRounds
         : DEFAULT_CONFIG.maxToolRounds;
     const effectiveMaxRounds = requiresTool
-      ? Math.min(configuredMaxRounds, isGitRequest ? 15 : isReadOnlyFsRequest ? 5 : 10)
+      ? Math.min(configuredMaxRounds, isGitRequest ? 20 : isReadOnlyFsRequest ? 8 : 16)
       : 8;
     const maxToolRounds = isPureWebLookup
       ? Math.min(effectiveMaxRounds, 3)
@@ -3432,6 +3457,7 @@ async function handleChat(req, res) {
           toolCalls,
           toolResults,
           defaultPrompt: prompt,
+          toolStyle: usePromptOnlyTools ? "xml" : "native",
         });
       }
       return prompt;
