@@ -5,6 +5,7 @@ import {
   Save,
   RefreshCw,
   Check,
+  X,
   ChevronDown,
   ChevronUp,
   Sparkles,
@@ -76,6 +77,7 @@ export function SettingsForm() {
   const [models, setModels] = useState<string[]>([]);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [modelsError, setModelsError] = useState<string | null>(null);
+  const [showModelPicker, setShowModelPicker] = useState(false);
   const [showCorePrompt, setShowCorePrompt] = useState(false);
 
   useEffect(() => {
@@ -181,13 +183,16 @@ export function SettingsForm() {
         setModels(data.models);
         if (data.models.length === 1) {
           setConfig((prev) => ({ ...prev, model: data.models[0] }));
-        } else if (!config.model) {
-          setConfig((prev) => ({ ...prev, model: data.models[0] }));
+          setShowModelPicker(false);
+        } else {
+          setShowModelPicker(true);
         }
       } else {
+        setShowModelPicker(false);
         setModelsError("No models found on server");
       }
     } catch (error) {
+      setShowModelPicker(false);
       setModelsError(
         error instanceof Error ? error.message : "Connection failed"
       );
@@ -289,48 +294,40 @@ export function SettingsForm() {
             </Button>
           </div>
 
-          {models.length > 0 ? (
-            <div className="space-y-1.5">
-              <div className="max-h-48 overflow-y-auto rounded-lg border border-zinc-700 bg-zinc-950">
-                {models.map((m) => (
-                  <button
-                    key={m}
-                    type="button"
-                    onClick={() => setConfig({ ...config, model: m })}
-                    className={`flex w-full items-center justify-between px-3 py-2.5 text-left text-sm transition-colors ${
-                      config.model === m
-                        ? "bg-blue-600/20 text-blue-400"
-                        : "text-zinc-300 hover:bg-zinc-800"
-                    }`}
-                  >
-                    <span className="truncate">{m}</span>
-                    {config.model === m && (
-                      <Check className="h-4 w-4 shrink-0" />
-                    )}
-                  </button>
-                ))}
+          <div className="space-y-1.5">
+            <Input
+              id="model"
+              value={config.model}
+              onChange={(e) => setConfig({ ...config, model: e.target.value })}
+              placeholder="Fetch models or type a model id manually"
+              className="border-zinc-700 bg-zinc-950 text-zinc-100"
+            />
+            {models.length > 1 ? (
+              <div className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-950/60 px-3 py-2">
+                <p className="text-xs text-zinc-500">
+                  {models.length} models available from this endpoint
+                </p>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setShowModelPicker(true)}
+                  className="h-7 text-xs text-blue-400 hover:text-blue-300"
+                >
+                  Choose Model
+                </Button>
               </div>
+            ) : models.length === 1 ? (
               <p className="text-xs text-zinc-500">
-                {models.length} model{models.length !== 1 ? "s" : ""} available
+                One model found and auto-selected. Click Save to apply it to chat.
               </p>
+            ) : (
               <p className="text-xs text-zinc-500">
-                Select a model, then click Save before returning to chat.
+                Click Fetch Models to load models from the endpoint, then Save to
+                apply your selection.
               </p>
-            </div>
-          ) : (
-            <div className="space-y-1.5">
-              <Input
-                id="model"
-                value={config.model}
-                onChange={(e) => setConfig({ ...config, model: e.target.value })}
-                placeholder="Select after fetching or type manually"
-                className="border-zinc-700 bg-zinc-950 text-zinc-100"
-              />
-              <p className="text-xs text-zinc-500">
-                After changing the model, click Save to apply it to new chats.
-              </p>
-            </div>
-          )}
+            )}
+          </div>
 
           {modelsError && <p className="text-xs text-red-400">{modelsError}</p>}
         </div>
@@ -421,6 +418,60 @@ export function SettingsForm() {
           </label>
         </div>
       </section>
+
+      {showModelPicker ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4">
+          <div className="w-full max-w-xl rounded-2xl border border-zinc-800 bg-zinc-950 shadow-2xl">
+            <div className="flex items-start justify-between gap-4 border-b border-zinc-800 px-4 py-4">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
+                  Model Picker
+                </p>
+                <h3 className="mt-1 text-lg font-semibold text-zinc-100">
+                  Choose a model from this endpoint
+                </h3>
+                <p className="mt-1 text-sm text-zinc-400">
+                  Select a model, then click Save in settings to apply it.
+                </p>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={() => setShowModelPicker(false)}
+                className="h-9 w-9 rounded-full border border-white/10 bg-white/[0.02] text-zinc-300 hover:bg-white/[0.06] hover:text-white"
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+
+            <div className="max-h-[60vh] overflow-y-auto p-4">
+              <div className="space-y-2">
+                {models.map((model) => (
+                  <button
+                    key={model}
+                    type="button"
+                    onClick={() => {
+                      setConfig((prev) => ({ ...prev, model }));
+                      setShowModelPicker(false);
+                    }}
+                    className={`flex w-full items-center justify-between rounded-xl border px-3 py-3 text-left text-sm transition-colors ${
+                      config.model === model
+                        ? "border-blue-500/60 bg-blue-500/15 text-blue-300"
+                        : "border-zinc-800 bg-zinc-900 text-zinc-300 hover:border-zinc-700 hover:bg-zinc-800"
+                    }`}
+                  >
+                    <span className="truncate pr-3">{model}</span>
+                    {config.model === model ? (
+                      <Check className="h-4 w-4 shrink-0" />
+                    ) : null}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <section className="space-y-4 rounded-2xl border border-zinc-800 bg-zinc-900/50 p-4">
         <div className="flex items-center gap-2">
