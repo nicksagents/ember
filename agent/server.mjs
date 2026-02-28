@@ -181,7 +181,7 @@ const DEFAULT_CONFIG = {
   top_k: 20,
   min_p: 0.05,
   repetition_penalty: 1.05,
-  max_tokens: 2048,
+  max_tokens: 4096,
   statelessProvider: true,
   lightweightMode: true,
   maxToolRounds: 20,
@@ -3157,10 +3157,11 @@ async function handleChat(req, res) {
     if (config.max_tokens) {
       payload.max_tokens = config.max_tokens;
     }
-    // For Qwen models during tool-requiring tasks, cap response length to
-    // prevent long narratives and force concise tool-call output
-    if (isQwenCoder && requiresTool) {
-      payload.max_tokens = Math.min(payload.max_tokens || 2048, 768);
+    // For Qwen models, ensure a generous max_tokens — write_file calls
+    // with large content need room, and the completion guards handle
+    // preventing endless looping (not token limits)
+    if (isQwenCoder && !payload.max_tokens) {
+      payload.max_tokens = 4096;
     }
     if (typeof config.min_p === "number" && config.min_p > 0) {
       payload.min_p = config.min_p;
@@ -3366,7 +3367,8 @@ async function handleChat(req, res) {
         "CRITICAL: Call tools using <tool_call>{\"name\":\"...\",\"arguments\":{...}}</tool_call>. " +
         "NEVER use ```bash blocks. NEVER fabricate command output. " +
         "NEVER stop after saying what you will do -- call the tool NOW. " +
-        "Continue the tool loop until the task is complete and verified."
+        "Complete ALL requested steps before responding. If the user asks to write a file AND start a server, do BOTH with tool calls before giving your final answer. " +
+        "NEVER say 'I have completed' until every step is done and verified with tools."
       );
       if (usePromptOnlyTools) {
         systemNotes.push(
@@ -3407,8 +3409,8 @@ async function handleChat(req, res) {
         ? config.maxToolRounds
         : DEFAULT_CONFIG.maxToolRounds;
     const effectiveMaxRounds = requiresTool
-      ? Math.min(configuredMaxRounds, isGitRequest ? 15 : isReadOnlyFsRequest ? 5 : 10)
-      : 8;
+      ? Math.min(configuredMaxRounds, isGitRequest ? 20 : isReadOnlyFsRequest ? 8 : 15)
+      : 10;
     const maxToolRounds = isPureWebLookup
       ? Math.min(effectiveMaxRounds, 3)
       : effectiveMaxRounds;

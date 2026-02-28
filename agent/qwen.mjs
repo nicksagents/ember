@@ -109,15 +109,16 @@ export function buildQwenToolContinuationPrompt({
         ? toolResults[i].content
         : stringifyCompact(toolResults[i]?.content);
     lines.push(`[Tool result: ${name}]`);
-    lines.push(truncateText(content, 2200));
+    lines.push(truncateText(content, 4000));
   }
 
   if (defaultPrompt) {
     lines.push(defaultPrompt);
   }
   lines.push(
-    "Next step: call a tool using <tool_call>{\"name\":\"...\",\"arguments\":{...}}</tool_call> or give your final answer. " +
-    "Do NOT describe what you will do. Do NOT use ```bash blocks."
+    "If there are more steps to complete, call the next tool NOW using <tool_call>{\"name\":\"...\",\"arguments\":{...}}</tool_call>. " +
+    "Only give your final answer when ALL requested steps are done. " +
+    "Do NOT describe what you will do. Do NOT use ```bash blocks. Do NOT claim success until verified."
   );
   return lines.filter(Boolean).join("\n\n");
 }
