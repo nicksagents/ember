@@ -225,6 +225,18 @@ async function readText(filePath, fallback = "") {
   }
 }
 
+async function loadEmberProjectManifest(projectDir) {
+  const targetDir = String(projectDir || "").trim();
+  if (!targetDir) return null;
+  try {
+    const raw = await readFile(path.join(targetDir, ".ember-project.json"), "utf8");
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 async function logEvent(event, data = {}) {
   const line = JSON.stringify({
     ts: new Date().toISOString(),
@@ -2215,6 +2227,27 @@ function inferProjectDirectory(userContent, config) {
   return "";
 }
 
+function inferRecentProjectDirectory(history, config) {
+  const home = config.homeDir || os.homedir();
+  const desktop = config.desktopDir || path.join(home, "Desktop");
+  const recent = Array.isArray(history) ? [...history].slice(-10).reverse() : [];
+  for (const entry of recent) {
+    const text = String(entry?.content || "");
+    const directDesktopMatch = text.match(/Desktop\/([a-zA-Z0-9._-]+)/i);
+    if (directDesktopMatch) {
+      return path.join(desktop, directDesktopMatch[1]);
+    }
+    const namedFolderMatch =
+      text.match(/folder named ["“]?([a-zA-Z0-9._-]+)["”]?/i) ||
+      text.match(/new folder ["“]?([a-zA-Z0-9._-]+)["”]?/i) ||
+      text.match(/project folder ["“]?([a-zA-Z0-9._-]+)["”]?/i);
+    if (namedFolderMatch) {
+      return path.join(desktop, namedFolderMatch[1]);
+    }
+  }
+  return "";
+}
+
 function inferServerStartCommand(userContent) {
   const text = String(userContent || "").toLowerCase();
   if (text.includes("pnpm")) return "pnpm dev";
@@ -2300,6 +2333,14 @@ function buildServerCompletionGuard(userContent) {
 }
 
 function describeToolProgress(name, args, result, phase = "running") {
+  if (name === "scaffold_next_shadcn_project") {
+    if (phase === "running") {
+      return `Scaffolding Next.js + shadcn project in ${args?.projectPath || "target folder"}`;
+    }
+    return result?.ok
+      ? `Project scaffolded in ${result.projectPath || args?.projectPath || "target folder"}`
+      : "Project scaffold failed";
+  }
   if (name === "list_processes") {
     if (phase === "running") {
       return args?.port
@@ -2592,12 +2633,20 @@ async function handleChat(req, res) {
       const home = config.homeDir || os.homedir();
       const desktop = config.desktopDir || path.join(home, "Desktop");
       const phase = options?.phase || "execute";
+      const explicitProjectDir = inferProjectDirectory(userContent, config);
+      const recentProjectDir = inferRecentProjectDirectory(history, config);
 
       const wantsDesktop = text.includes("desktop");
       const wantsWorkspace =
         /\b(?:project|repo|repository|codebase|source|structure|how you work|yourself|your own)\b/.test(
           text
         );
+      const scaffoldNextApp =
+        /\b(?:next(?:\.js|js)?|shadcn)\b/.test(text) &&
+        /\b(?:create|make|build|scaffold|set\s*up|initialize|init|bootstrap)\b/.test(
+          text
+        ) &&
+        /\b(?:project|app|application|site|website|folder)\b/.test(text);
       const listLike =
         text.includes("list") ||
         text.includes("what's in") ||
@@ -2644,10 +2693,24 @@ async function handleChat(req, res) {
         };
       }
 
+      if (scaffoldNextApp) {
+        return {
+          name: "scaffold_next_shadcn_project",
+          arguments: {
+            projectPath:
+              explicitProjectDir ||
+              recentProjectDir ||
+              path.join(desktop, "ember-next-app"),
+            packageManager: "npm",
+          },
+        };
+      }
+
       if (processTask) {
-        const cwd = inferProjectDirectory(userContent, config);
+        const cwd = explicitProjectDir || recentProjectDir;
         const { host, port, intent } = processTask;
         const loopState = inspectToolLoopMessages(_payload?.messages || []);
+        const projectManifest = cwd ? await loadEmberProjectManifest(cwd) : null;
         if (phase === "verify" && intent !== "stop") {
           return {
             name: "verify_server",
@@ -2700,7 +2763,11 @@ async function handleChat(req, res) {
             name: "start_dev_server",
             arguments: {
               cwd: cwd || desktop,
-              command: inferServerStartCommand(userContent),
+              command:
+                typeof projectManifest?.startCommand === "string" &&
+                projectManifest.startCommand.trim()
+                  ? projectManifest.startCommand.trim()
+                  : inferServerStartCommand(userContent),
               host,
               port,
             },
