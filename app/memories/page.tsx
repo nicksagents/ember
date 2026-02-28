@@ -164,7 +164,7 @@ export default function MemoriesPage() {
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-1 flex-col bg-[#050505]">
+    <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-[#050505]">
       <Header title="Memory Network" showBack />
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
         <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_40%,rgba(251,146,60,0.08),transparent_30%),radial-gradient(circle_at_68%_26%,rgba(239,68,68,0.06),transparent_24%),linear-gradient(180deg,rgba(255,255,255,0.02),transparent_25%)]" />

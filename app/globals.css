@@ -103,6 +103,8 @@ body {
 /* Prevent iOS rubber-band overscroll on the body */
 html,
 body {
+  height: 100%;
+  overflow: hidden;
   overscroll-behavior: none;
   -webkit-overflow-scrolling: touch;
 }

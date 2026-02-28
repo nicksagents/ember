@@ -19,10 +19,11 @@ export function Header({
   return (
     <header
       className={cn(
-        "sticky top-0 z-30 flex min-h-[56px] items-center justify-between border-b border-transparent px-4 py-2.5 backdrop-blur-xl sm:min-h-[58px] sm:px-5",
+        "sticky top-0 z-30 shrink-0 flex min-h-[56px] items-center justify-between border-b border-transparent px-4 py-2.5 backdrop-blur-xl sm:min-h-[58px] sm:px-5",
         !showBack &&
-          "bg-[linear-gradient(180deg,rgba(8,8,8,0.9),rgba(8,8,8,0.72),rgba(8,8,8,0.18))]",
-        showBack && "border-b border-white/8"
+          "bg-[linear-gradient(180deg,rgba(8,8,8,0.94),rgba(8,8,8,0.8),rgba(8,8,8,0.32))]",
+        showBack &&
+          "border-b border-white/8 bg-[linear-gradient(180deg,rgba(8,8,8,0.96),rgba(8,8,8,0.88),rgba(8,8,8,0.62))]"
       )}
     >
       <div className="flex items-center gap-2">

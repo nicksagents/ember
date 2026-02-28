@@ -169,10 +169,10 @@ export function Chat({
   );
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       <div
         ref={scrollRef}
-        className="scrollbar-hide flex-1 overflow-y-auto px-4 pb-24 pt-1 sm:px-6 sm:pb-28"
+        className="scrollbar-hide min-h-0 flex-1 overflow-y-auto px-4 pb-24 pt-1 sm:px-6 sm:pb-28"
       >
         {messages.length === 0 ? (
           <div className="flex min-h-full flex-col items-center justify-center px-4 text-center">
@@ -212,7 +212,7 @@ export function Chat({
           </div>
         )}
       </div>
-      <div className="sticky bottom-0 z-20 px-4 pb-4 pt-3 sm:px-6 sm:pb-5 relative">
+      <div className="sticky bottom-0 z-20 shrink-0 px-4 pb-4 pt-3 sm:px-6 sm:pb-5 relative">
         <div className="pointer-events-none absolute inset-x-0 bottom-0 top-0 bg-[linear-gradient(180deg,rgba(3,3,3,0),rgba(3,3,3,0.58)_18%,rgba(3,3,3,0.9)_62%,rgba(3,3,3,0.98))]" />
         <div className="mx-auto w-full max-w-[46rem]">
           <div className="relative">
