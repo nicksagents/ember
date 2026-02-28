@@ -57,8 +57,8 @@ export function Message({ message }: MessageProps) {
           className={cn(
             "whitespace-pre-wrap break-words",
             isUser
-              ? "rounded-[1.35rem] border border-white/10 bg-white/[0.08] px-4 py-2.5 text-[14px] leading-6 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
-              : "text-[14px] leading-[1.8] text-zinc-100"
+              ? "rounded-[1.35rem] border border-white/10 bg-white/[0.08] px-4 py-2.5 text-[12px] leading-5 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] sm:text-[12.5px]"
+              : "text-[12px] leading-[1.65] text-zinc-100 sm:text-[12.5px]"
           )}
         >
           {message.content}

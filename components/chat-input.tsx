@@ -56,7 +56,7 @@ export function ChatInput({
 
   return (
     <div className="pb-safe">
-      <div className="rounded-[1.75rem] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.035),rgba(255,255,255,0.015))] px-4 py-3.5 shadow-[0_24px_80px_rgba(0,0,0,0.45)] sm:px-[18px] sm:py-3.5">
+      <div className="rounded-[1.5rem] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.035),rgba(255,255,255,0.015))] px-4 py-2.5 shadow-[0_20px_64px_rgba(0,0,0,0.42)] sm:px-4.5 sm:py-2.5">
         <textarea
           ref={textareaRef}
           value={input}
@@ -65,11 +65,11 @@ export function ChatInput({
           placeholder="Type a message..."
           disabled={disabled}
           rows={1}
-          className="min-h-[68px] max-h-[144px] w-full resize-none bg-transparent text-[15px] leading-6 text-zinc-100 placeholder-zinc-500 focus:outline-none disabled:opacity-50 sm:min-h-[72px] sm:text-[14px] sm:leading-6"
+          className="min-h-[46px] max-h-[132px] w-full resize-none bg-transparent text-[15px] leading-6 text-zinc-100 placeholder-zinc-500 focus:outline-none disabled:opacity-50 sm:min-h-[48px] sm:text-[14px] sm:leading-6"
         />
-        <div className="mt-2.5 flex items-center justify-between gap-3">
+        <div className="mt-2 flex items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <div className="flex h-[34px] w-[34px] items-center justify-center rounded-full border border-white/10 bg-white/[0.03] text-zinc-300 sm:h-9 sm:w-9">
+            <div className="flex h-8 w-8 items-center justify-center rounded-full border border-white/10 bg-white/[0.03] text-zinc-300 sm:h-8.5 sm:w-8.5">
               <Plus className="h-3.5 w-3.5" />
             </div>
           </div>
@@ -85,7 +85,7 @@ export function ChatInput({
               disabled={disabled || !input.trim()}
               size="icon"
               className={cn(
-                "h-9 w-9 shrink-0 rounded-full border transition sm:h-10 sm:w-10",
+                "h-8.5 w-8.5 shrink-0 rounded-full border transition sm:h-9 sm:w-9",
                 input.trim() && !disabled
                   ? "border-orange-400/30 bg-zinc-100 text-zinc-950 hover:bg-white"
                   : "border-white/8 bg-white/[0.06] text-zinc-500"

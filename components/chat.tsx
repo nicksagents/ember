@@ -1,7 +1,14 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Activity, CheckCircle2, LoaderCircle, Wrench, XCircle } from "lucide-react";
+import {
+  Activity,
+  ArrowDown,
+  CheckCircle2,
+  LoaderCircle,
+  Wrench,
+  XCircle,
+} from "lucide-react";
 import {
   Message,
   type MessageData,
@@ -36,6 +43,8 @@ interface ChatProgressState {
   steps: ChatProgressStep[];
 }
 
+const BOTTOM_THRESHOLD_PX = 40;
+
 export function Chat({
   conversationId,
   onConversationUpdate,
@@ -47,17 +56,40 @@ export function Chat({
   const [isLoading, setIsLoading] = useState(false);
   const [activeModelLabel, setActiveModelLabel] = useState<string>("");
   const [progress, setProgress] = useState<ChatProgressState | null>(null);
+  const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const shouldStickToBottomRef = useRef(true);
 
-  const scrollToBottom = useCallback(() => {
+  const isNearBottom = useCallback((element: HTMLDivElement | null) => {
+    if (!element) return true;
+    const distanceFromBottom =
+      element.scrollHeight - element.scrollTop - element.clientHeight;
+    return distanceFromBottom <= BOTTOM_THRESHOLD_PX;
+  }, []);
+
+  const updateScrollState = useCallback(() => {
+    const nearBottom = isNearBottom(scrollRef.current);
+    shouldStickToBottomRef.current = nearBottom;
+    setShowJumpToBottom(!nearBottom);
+  }, [isNearBottom]);
+
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
     if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      scrollRef.current.scrollTo({
+        top: scrollRef.current.scrollHeight,
+        behavior,
+      });
     }
   }, []);
 
   useEffect(() => {
-    scrollToBottom();
-  }, [messages, scrollToBottom]);
+    if (!shouldStickToBottomRef.current) return;
+    const frame = window.requestAnimationFrame(() => {
+      scrollToBottom();
+      updateScrollState();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [messages, progress, isLoading, scrollToBottom, updateScrollState]);
 
   useEffect(() => {
     onThinkingChange?.(isLoading);
@@ -91,6 +123,8 @@ export function Chat({
     if (!conversationId) {
       setMessages([]);
       setProgress(null);
+      shouldStickToBottomRef.current = true;
+      setShowJumpToBottom(false);
       return;
     }
     const loadMessages = async () => {
@@ -124,6 +158,8 @@ export function Chat({
           .find((entry) => entry.role === "assistant" && entry.meta?.model)
           ?.meta?.model;
         if (latestModel) setActiveModelLabel(latestModel);
+        shouldStickToBottomRef.current = true;
+        setShowJumpToBottom(false);
       } catch {
         setMessages([]);
       }
@@ -195,6 +231,8 @@ export function Chat({
       };
 
       setMessages((prev) => [...prev, userMessage]);
+      shouldStickToBottomRef.current = true;
+      setShowJumpToBottom(false);
       setIsLoading(true);
       setProgress({
         conversationId: activeId,
@@ -244,11 +282,22 @@ export function Chat({
     [conversationId, onConversationUpdate, onEnsureConversation]
   );
 
+  const handleScroll = useCallback(() => {
+    updateScrollState();
+  }, [updateScrollState]);
+
+  const handleJumpToBottom = useCallback(() => {
+    shouldStickToBottomRef.current = true;
+    scrollToBottom("smooth");
+    setShowJumpToBottom(false);
+  }, [scrollToBottom]);
+
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       <div
         ref={scrollRef}
-        className="scrollbar-hide min-h-0 flex-1 overflow-y-auto px-4 pb-8 pt-1 sm:px-6 sm:pb-10"
+        onScroll={handleScroll}
+        className="scrollbar-hide min-h-0 flex-1 overflow-y-auto px-4 pb-3 pt-1 sm:px-6 sm:pb-4"
       >
         {messages.length === 0 ? (
           <div className="flex min-h-full flex-col items-center justify-center px-4 text-center">
@@ -268,10 +317,21 @@ export function Chat({
           </div>
         )}
       </div>
-      <div className="sticky bottom-0 z-20 shrink-0 px-4 pb-3 pt-2 sm:px-6 sm:pb-4 relative">
+      <div className="sticky bottom-0 z-20 shrink-0 px-4 pb-2 pt-1 sm:px-6 sm:pb-3 relative">
         <div className="pointer-events-none absolute inset-x-0 bottom-0 top-0 bg-[linear-gradient(180deg,rgba(3,3,3,0),rgba(3,3,3,0.58)_18%,rgba(3,3,3,0.9)_62%,rgba(3,3,3,0.98))]" />
         <div className="mx-auto w-full max-w-[46rem]">
           <div className="relative">
+            {showJumpToBottom ? (
+              <button
+                type="button"
+                onClick={handleJumpToBottom}
+                className="absolute left-1/2 top-0 z-10 inline-flex -translate-x-1/2 -translate-y-[calc(100%+0.35rem)] items-center gap-2 rounded-full border border-white/10 bg-zinc-950/95 px-3 py-1.5 text-xs text-zinc-200 shadow-[0_12px_36px_rgba(0,0,0,0.35)] transition hover:border-white/20 hover:bg-zinc-900"
+                aria-label="Jump to latest messages"
+              >
+                <ArrowDown className="h-3.5 w-3.5" />
+                Latest
+              </button>
+            ) : null}
             <ChatInput
               onSend={handleSend}
               disabled={isLoading || (!conversationId && !onEnsureConversation)}
