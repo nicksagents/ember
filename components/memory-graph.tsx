@@ -21,17 +21,46 @@ type MemoryGraphData = {
   links: MemoryLink[];
 };
 
-const COLOR_BY_TYPE: Record<string, string> = {
-  identity: "rgba(0,245,255,0.9)",
-  preference: "rgba(255,61,247,0.9)",
-  workflow: "rgba(110,255,139,0.9)",
-  project: "rgba(255,169,77,0.9)",
-  reference: "rgba(157,77,255,0.9)",
-  cluster: "rgba(255,255,255,0.9)",
+type RenderNode = MemoryNode & {
+  x: number;
+  y: number;
+  z: number;
+  radius: number;
+  screenX: number;
+  screenY: number;
+  depthScale: number;
 };
 
-const getColor = (type: string) =>
-  COLOR_BY_TYPE[String(type || "").toLowerCase()] || "rgba(70,199,255,0.9)";
+type RenderLink = { a: number; b: number; weight: number };
+
+const COLOR_BY_TYPE: Record<string, [number, number, number]> = {
+  identity: [248, 250, 252],
+  preference: [251, 146, 60],
+  workflow: [239, 68, 68],
+  project: [253, 186, 116],
+  reference: [161, 161, 170],
+  cluster: [255, 237, 213],
+};
+
+function getColor(type: string) {
+  return COLOR_BY_TYPE[String(type || "").toLowerCase()] || [251, 146, 60];
+}
+
+function getNodePosition(index: number, total: number, radius: number) {
+  const t = total <= 1 ? 0.5 : index / (total - 1);
+  const phi = Math.acos(1 - 2 * t);
+  const theta = Math.PI * (1 + Math.sqrt(5)) * index;
+  const x = Math.cos(theta) * Math.sin(phi);
+  const y = Math.cos(phi);
+  const z = Math.sin(theta) * Math.sin(phi);
+
+  // Widen the cloud so it reads more like a brain/web than a sphere.
+  const warpX = x * radius * 1.55;
+  const warpY = y * radius * 0.92 * (1 - Math.min(0.35, Math.abs(x) * 0.22));
+  const warpZ = z * radius * 1.18;
+
+  return { x: warpX, y: warpY, z: warpZ };
+}
 
 export function MemoryGraph({
   graph,
@@ -42,34 +71,25 @@ export function MemoryGraph({
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stateRef = useRef<{
-    nodes: Array<
-      MemoryNode & { x: number; y: number; vx: number; vy: number; radius: number }
-    >;
-    links: Array<{ a: number; b: number; w: number }>;
-    offsetX: number;
-    offsetY: number;
-    zoom: number;
-    mouseX: number;
-    mouseY: number;
+    nodes: RenderNode[];
+    links: RenderLink[];
+    rotationY: number;
+    rotationX: number;
+    dragX: number;
+    dragY: number;
     dragging: boolean;
-    dragStartX: number;
-    dragStartY: number;
-    lastX: number;
-    lastY: number;
-    pulses?: Array<{ link: number; t: number; speed: number; size: number }>;
+    hoverIndex: number;
+    pulses: Array<{ linkIndex: number; t: number; speed: number }>;
   }>({
     nodes: [],
     links: [],
-    offsetX: 0,
-    offsetY: 0,
-    zoom: 1,
-    mouseX: 0,
-    mouseY: 0,
+    rotationY: 0,
+    rotationX: -0.18,
+    dragX: 0,
+    dragY: 0,
     dragging: false,
-    dragStartX: 0,
-    dragStartY: 0,
-    lastX: 0,
-    lastY: 0,
+    hoverIndex: -1,
+    pulses: [],
   });
 
   useEffect(() => {
@@ -79,315 +99,246 @@ export function MemoryGraph({
     if (!ctx) return;
 
     const resize = () => {
-      canvas.width = canvas.clientWidth * window.devicePixelRatio;
-      canvas.height = canvas.clientHeight * window.devicePixelRatio;
-      ctx.setTransform(window.devicePixelRatio, 0, 0, window.devicePixelRatio, 0, 0);
+      const ratio = window.devicePixelRatio || 1;
+      canvas.width = Math.floor(canvas.clientWidth * ratio);
+      canvas.height = Math.floor(canvas.clientHeight * ratio);
+      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
     };
+
     resize();
     window.addEventListener("resize", resize);
 
-    const baseW = canvas.clientWidth;
-    const baseH = canvas.clientHeight;
-    const spread = Math.min(baseW, baseH) * 0.35;
-    const centerX = baseW * 0.5;
-    const centerY = baseH * 0.5;
-    const nodes = graph.nodes.map((node) => ({
-      ...node,
-      x: centerX + (Math.random() - 0.5) * spread,
-      y: centerY + (Math.random() - 0.5) * spread,
-      vx: -0.5 + Math.random(),
-      vy: -0.5 + Math.random(),
-      radius: Math.max(1.5, Math.min(10, node.size * 3.2)),
-    }));
+    const bounds = () => ({
+      width: canvas.clientWidth,
+      height: canvas.clientHeight,
+    });
 
-    const nodeIndex = new Map<string, number>();
-    nodes.forEach((n, i) => nodeIndex.set(n.id, i));
+    const baseRadius = Math.min(bounds().width, bounds().height) * 0.26;
+    const nodes: RenderNode[] = graph.nodes.map((node, index) => {
+      const position = getNodePosition(index, Math.max(graph.nodes.length, 1), baseRadius);
+      return {
+        ...node,
+        ...position,
+        radius: Math.max(1.4, Math.min(6.6, node.size * 2.25)),
+        screenX: 0,
+        screenY: 0,
+        depthScale: 1,
+      };
+    });
+
+    const indexById = new Map<string, number>();
+    nodes.forEach((node, index) => indexById.set(node.id, index));
     const links = graph.links
       .map((link) => {
-        const a = nodeIndex.get(link.source);
-        const b = nodeIndex.get(link.target);
+        const a = indexById.get(link.source);
+        const b = indexById.get(link.target);
         if (a == null || b == null) return null;
-        return { a, b, w: link.weight };
+        return { a, b, weight: link.weight };
       })
-      .filter(Boolean) as Array<{ a: number; b: number; w: number }>;
+      .filter(Boolean) as RenderLink[];
 
     stateRef.current.nodes = nodes;
     stateRef.current.links = links;
-    stateRef.current.offsetX = 0;
-    stateRef.current.offsetY = 0;
-    stateRef.current.zoom = 1;
+    stateRef.current.hoverIndex = -1;
+    stateRef.current.pulses = Array.from({
+      length: Math.min(80, Math.max(16, links.length * 2)),
+    }).map(() => ({
+      linkIndex: Math.floor(Math.random() * Math.max(links.length, 1)),
+      t: Math.random(),
+      speed: 0.003 + Math.random() * 0.005,
+    }));
 
-    const onMouseMove = (event: MouseEvent) => {
-      const rect = canvas.getBoundingClientRect();
-      const x = event.clientX - rect.left;
-      const y = event.clientY - rect.top;
+    const projectNode = (node: RenderNode) => {
+      const { width, height } = bounds();
       const state = stateRef.current;
-      state.mouseX = x;
-      state.mouseY = y;
-      if (state.dragging) {
-        state.offsetX = state.lastX + (x - state.dragStartX);
-        state.offsetY = state.lastY + (y - state.dragStartY);
-      }
+      const cosY = Math.cos(state.rotationY);
+      const sinY = Math.sin(state.rotationY);
+      const cosX = Math.cos(state.rotationX);
+      const sinX = Math.sin(state.rotationX);
+
+      const x1 = node.x * cosY - node.z * sinY;
+      const z1 = node.x * sinY + node.z * cosY;
+      const y2 = node.y * cosX - z1 * sinX;
+      const z2 = node.y * sinX + z1 * cosX;
+
+      const camera = Math.max(width, height) * 1.25;
+      const perspective = camera / (camera - z2);
+
+      node.depthScale = perspective;
+      node.screenX = width * 0.5 + x1 * perspective + state.dragX;
+      node.screenY = height * 0.52 + y2 * perspective + state.dragY;
     };
 
-    const onMouseDown = (event: MouseEvent) => {
+    const updateHover = (clientX: number, clientY: number) => {
       const rect = canvas.getBoundingClientRect();
-      const x = event.clientX - rect.left;
-      const y = event.clientY - rect.top;
-      const state = stateRef.current;
-      state.dragging = true;
-      state.dragStartX = x;
-      state.dragStartY = y;
-      state.lastX = state.offsetX;
-      state.lastY = state.offsetY;
+      const x = clientX - rect.left;
+      const y = clientY - rect.top;
+      let hoverIndex = -1;
+      let minDistance = Infinity;
+      for (let i = 0; i < stateRef.current.nodes.length; i += 1) {
+        const node = stateRef.current.nodes[i];
+        const radius = node.radius * node.depthScale + 6;
+        const distance = Math.hypot(x - node.screenX, y - node.screenY);
+        if (distance <= radius && distance < minDistance) {
+          hoverIndex = i;
+          minDistance = distance;
+        }
+      }
+      stateRef.current.hoverIndex = hoverIndex;
+    };
+
+    const onMouseMove = (event: MouseEvent) => {
+      updateHover(event.clientX, event.clientY);
+      if (!stateRef.current.dragging) return;
+      stateRef.current.rotationY += event.movementX * 0.006;
+      stateRef.current.rotationX = Math.max(
+        -0.72,
+        Math.min(0.72, stateRef.current.rotationX + event.movementY * 0.004)
+      );
+    };
+
+    const onMouseDown = () => {
+      stateRef.current.dragging = true;
     };
 
     const onMouseUp = () => {
-      const state = stateRef.current;
-      state.dragging = false;
+      stateRef.current.dragging = false;
     };
 
-    const zoomAt = (x: number, y: number, delta: number) => {
-      const state = stateRef.current;
-      const prevZoom = state.zoom;
-      const nextZoom = Math.min(2.4, Math.max(0.6, prevZoom + delta));
-      if (nextZoom === prevZoom) return;
-      const worldX = (x - state.offsetX) / prevZoom;
-      const worldY = (y - state.offsetY) / prevZoom;
-      state.zoom = nextZoom;
-      state.offsetX = x - worldX * nextZoom;
-      state.offsetY = y - worldY * nextZoom;
+    const onMouseLeave = () => {
+      stateRef.current.dragging = false;
+      stateRef.current.hoverIndex = -1;
     };
 
-    const onWheel = (event: WheelEvent) => {
-      event.preventDefault();
-      const rect = canvas.getBoundingClientRect();
-      const x = event.clientX - rect.left;
-      const y = event.clientY - rect.top;
-      const delta = Math.sign(event.deltaY) * -0.08;
-      zoomAt(x, y, delta);
-    };
-
-    const onClick = (event: MouseEvent) => {
-      const rect = canvas.getBoundingClientRect();
-      const x = event.clientX - rect.left;
-      const y = event.clientY - rect.top;
-      const state = stateRef.current;
-      const zoom = state.zoom;
-      const ox = state.offsetX;
-      const oy = state.offsetY;
-      const clicked = state.nodes.find((node) => {
-        const dx = x - (node.x * zoom + ox);
-        const dy = y - (node.y * zoom + oy);
-        return Math.hypot(dx, dy) <= node.radius * zoom + 4;
-      });
-      onSelect(clicked || null);
+    const onClick = () => {
+      const hovered = stateRef.current.hoverIndex;
+      onSelect(hovered >= 0 ? stateRef.current.nodes[hovered] : null);
     };
 
     canvas.addEventListener("mousemove", onMouseMove);
     canvas.addEventListener("mousedown", onMouseDown);
+    canvas.addEventListener("mouseleave", onMouseLeave);
     window.addEventListener("mouseup", onMouseUp);
-    canvas.addEventListener("wheel", onWheel, { passive: false });
     canvas.addEventListener("click", onClick);
 
-    const touchState = { lastDist: 0 };
-    const getTouchDistance = (touches: TouchList) => {
-      const [a, b] = [touches[0], touches[1]];
-      const dx = a.clientX - b.clientX;
-      const dy = a.clientY - b.clientY;
-      return Math.hypot(dx, dy);
-    };
-    const onTouchStart = (event: TouchEvent) => {
-      const state = stateRef.current;
-      if (event.touches.length === 1) {
-        const rect = canvas.getBoundingClientRect();
-        const x = event.touches[0].clientX - rect.left;
-        const y = event.touches[0].clientY - rect.top;
-        state.dragging = true;
-        state.dragStartX = x;
-        state.dragStartY = y;
-        state.lastX = state.offsetX;
-        state.lastY = state.offsetY;
-      } else if (event.touches.length === 2) {
-        touchState.lastDist = getTouchDistance(event.touches);
-      }
-    };
-    const onTouchMove = (event: TouchEvent) => {
-      event.preventDefault();
-      const state = stateRef.current;
-      const rect = canvas.getBoundingClientRect();
-      if (event.touches.length === 1) {
-        const x = event.touches[0].clientX - rect.left;
-        const y = event.touches[0].clientY - rect.top;
-        if (state.dragging) {
-          state.offsetX = state.lastX + (x - state.dragStartX);
-          state.offsetY = state.lastY + (y - state.dragStartY);
-        }
-      } else if (event.touches.length === 2) {
-        const dist = getTouchDistance(event.touches);
-        const midX = (event.touches[0].clientX + event.touches[1].clientX) / 2 - rect.left;
-        const midY = (event.touches[0].clientY + event.touches[1].clientY) / 2 - rect.top;
-        if (touchState.lastDist) {
-          const delta = (dist - touchState.lastDist) * 0.002;
-          zoomAt(midX, midY, delta);
-        }
-        touchState.lastDist = dist;
-      }
-    };
-    const onTouchEnd = () => {
-      const state = stateRef.current;
-      state.dragging = false;
-      touchState.lastDist = 0;
-    };
-    canvas.addEventListener("touchstart", onTouchStart, { passive: false });
-    canvas.addEventListener("touchmove", onTouchMove, { passive: false });
-    canvas.addEventListener("touchend", onTouchEnd);
-
-    let raf = 0;
+    let frameId = 0;
     const animate = () => {
+      const { width, height } = bounds();
       const state = stateRef.current;
-      const { nodes, links, mouseX, mouseY, offsetX, offsetY, zoom } = state;
-      ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight);
-      ctx.fillStyle = "rgba(0,0,0,1)";
-      ctx.fillRect(0, 0, canvas.clientWidth, canvas.clientHeight);
 
-      // Move nodes
-      const pad = 24;
-      nodes.forEach((node) => {
-        node.x += node.vx * 0.2;
-        node.y += node.vy * 0.2;
-        if (node.x < pad) {
-          node.x = pad;
-          node.vx *= -1;
-        }
-        if (node.x > canvas.clientWidth - pad) {
-          node.x = canvas.clientWidth - pad;
-          node.vx *= -1;
-        }
-        if (node.y < pad) {
-          node.y = pad;
-          node.vy *= -1;
-        }
-        if (node.y > canvas.clientHeight - pad) {
-          node.y = canvas.clientHeight - pad;
-          node.vy *= -1;
-        }
-      });
-
-      // Draw connections
-      ctx.lineWidth = 0.6;
-      const maxDistance = 240;
-      const dense = nodes.length <= 280;
-      const step = dense ? 1 : Math.ceil(nodes.length / 220);
-      for (let i = 0; i < nodes.length; i += 1) {
-        const a = nodes[i];
-        for (let j = i + 1; j < nodes.length; j += step) {
-          const b = nodes[j];
-          const dx = a.x - b.x;
-          const dy = a.y - b.y;
-          const dist = Math.hypot(dx, dy);
-          if (dist > maxDistance) continue;
-          const alpha = Math.max(0.08, Math.min(0.5, (maxDistance - dist) / 240));
-          ctx.strokeStyle = `rgba(246,255,122,${alpha})`;
-          ctx.beginPath();
-          ctx.moveTo(a.x * zoom + offsetX, a.y * zoom + offsetY);
-          ctx.lineTo(b.x * zoom + offsetX, b.y * zoom + offsetY);
-          ctx.stroke();
-        }
+      if (!state.dragging) {
+        state.rotationY += 0.0014;
       }
 
-      // Electric pulses along related links (API links)
-      if (!stateRef.current.pulses) {
-        const pulseCount = Math.min(1000, links.length * 3);
-        stateRef.current.pulses = Array.from({ length: pulseCount }, () => ({
-          link: Math.floor(Math.random() * Math.max(1, links.length)),
-          t: Math.random(),
-          speed: 0.002 + Math.random() * 0.006,
-          size: 1 + Math.random() * 2.2,
-        }));
+      ctx.clearRect(0, 0, width, height);
+
+      const bg = ctx.createRadialGradient(
+        width * 0.5,
+        height * 0.45,
+        40,
+        width * 0.5,
+        height * 0.5,
+        Math.max(width, height) * 0.72
+      );
+      bg.addColorStop(0, "rgba(22,22,22,0.9)");
+      bg.addColorStop(0.5, "rgba(8,8,8,0.98)");
+      bg.addColorStop(1, "rgba(3,3,3,1)");
+      ctx.fillStyle = bg;
+      ctx.fillRect(0, 0, width, height);
+
+      for (let i = 0; i < state.nodes.length; i += 1) {
+        projectNode(state.nodes[i]);
       }
-      const pulses = stateRef.current.pulses as Array<{
-        link: number;
-        t: number;
-        speed: number;
-        size: number;
-      }>;
-      ctx.shadowBlur = 18;
-      ctx.shadowColor = "rgba(120,240,255,0.9)";
-      pulses.forEach((pulse) => {
-        const link = links[pulse.link];
-        if (!link) return;
-        const a = nodes[link.a];
-        const b = nodes[link.b];
+
+      const sortedNodes = [...state.nodes].sort((a, b) => a.depthScale - b.depthScale);
+
+      ctx.lineWidth = 0.75;
+      for (const link of state.links) {
+        const a = state.nodes[link.a];
+        const b = state.nodes[link.b];
+        const depth = (a.depthScale + b.depthScale) * 0.5;
+        const alpha = Math.max(0.04, Math.min(0.18, link.weight * 0.18 * depth));
+        ctx.strokeStyle = `rgba(255,255,255,${alpha})`;
+        ctx.beginPath();
+        ctx.moveTo(a.screenX, a.screenY);
+        ctx.lineTo(b.screenX, b.screenY);
+        ctx.stroke();
+      }
+
+      for (const pulse of state.pulses) {
+        const link = state.links[pulse.linkIndex];
+        if (!link) continue;
+        const a = state.nodes[link.a];
+        const b = state.nodes[link.b];
         pulse.t += pulse.speed;
         if (pulse.t > 1) pulse.t = 0;
-        const x = a.x + (b.x - a.x) * pulse.t;
-        const y = a.y + (b.y - a.y) * pulse.t;
+        const x = a.screenX + (b.screenX - a.screenX) * pulse.t;
+        const y = a.screenY + (b.screenY - a.screenY) * pulse.t;
+        ctx.fillStyle = "rgba(251,146,60,0.9)";
+        ctx.shadowBlur = 14;
+        ctx.shadowColor = "rgba(251,146,60,0.75)";
         ctx.beginPath();
-        ctx.fillStyle = "rgba(145,230,255,0.95)";
-        ctx.arc(x * zoom + offsetX, y * zoom + offsetY, pulse.size, 0, Math.PI * 2);
+        ctx.arc(x, y, 1.5, 0, Math.PI * 2);
         ctx.fill();
-      });
+      }
 
-      // Draw dots
-      nodes.forEach((node) => {
-        const dx = mouseX - (node.x * zoom + offsetX);
-        const dy = mouseY - (node.y * zoom + offsetY);
-        const hover = Math.hypot(dx, dy) < node.radius * zoom * 1.6;
+      ctx.shadowBlur = 0;
+      for (const node of sortedNodes) {
+        const [r, g, b] = getColor(node.type);
+        const hover = state.hoverIndex >= 0 && state.nodes[state.hoverIndex]?.id === node.id;
+        const glowRadius = node.radius * node.depthScale * (hover ? 7.2 : 5.8);
+
         const glow = ctx.createRadialGradient(
-          node.x * zoom + offsetX,
-          node.y * zoom + offsetY,
+          node.screenX,
+          node.screenY,
           0,
-          node.x * zoom + offsetX,
-          node.y * zoom + offsetY,
-          node.radius * zoom * 6
+          node.screenX,
+          node.screenY,
+          glowRadius
         );
-        glow.addColorStop(0, getColor(node.type));
+        glow.addColorStop(0, `rgba(${r},${g},${b},0.34)`);
+        glow.addColorStop(0.35, `rgba(${r},${g},${b},0.14)`);
         glow.addColorStop(1, "rgba(0,0,0,0)");
-        ctx.beginPath();
         ctx.fillStyle = glow;
-        ctx.globalAlpha = hover ? 0.9 : 0.65;
-        ctx.arc(
-          node.x * zoom + offsetX,
-          node.y * zoom + offsetY,
-          node.radius * zoom * 6,
-          0,
-          Math.PI * 2
-        );
-        ctx.fill();
-        ctx.globalAlpha = 1;
         ctx.beginPath();
-        ctx.fillStyle = getColor(node.type);
-        ctx.shadowBlur = hover ? 18 : 12;
-        ctx.shadowColor = getColor(node.type);
+        ctx.arc(node.screenX, node.screenY, glowRadius, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = `rgba(${r},${g},${b},${hover ? 1 : 0.9})`;
+        ctx.shadowBlur = hover ? 18 : 10;
+        ctx.shadowColor = `rgba(${r},${g},${b},0.7)`;
+        ctx.beginPath();
         ctx.arc(
-          node.x * zoom + offsetX,
-          node.y * zoom + offsetY,
-          node.radius * zoom * (hover ? 1.2 : 1),
+          node.screenX,
+          node.screenY,
+          node.radius * node.depthScale * (hover ? 1.3 : 1),
           0,
           Math.PI * 2
         );
         ctx.fill();
-      });
+      }
+      ctx.shadowBlur = 0;
 
-      raf = requestAnimationFrame(animate);
+      frameId = requestAnimationFrame(animate);
     };
 
-    raf = requestAnimationFrame(animate);
+    frameId = requestAnimationFrame(animate);
 
     return () => {
       window.removeEventListener("resize", resize);
       canvas.removeEventListener("mousemove", onMouseMove);
       canvas.removeEventListener("mousedown", onMouseDown);
+      canvas.removeEventListener("mouseleave", onMouseLeave);
       window.removeEventListener("mouseup", onMouseUp);
-      canvas.removeEventListener("wheel", onWheel);
       canvas.removeEventListener("click", onClick);
-      canvas.removeEventListener("touchstart", onTouchStart);
-      canvas.removeEventListener("touchmove", onTouchMove);
-      canvas.removeEventListener("touchend", onTouchEnd);
-      cancelAnimationFrame(raf);
+      cancelAnimationFrame(frameId);
     };
   }, [graph, onSelect]);
 
-  return <canvas ref={canvasRef} className="h-full w-full" />;
+  return (
+    <canvas
+      ref={canvasRef}
+      className="h-full w-full cursor-grab active:cursor-grabbing"
+    />
+  );
 }

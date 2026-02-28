@@ -1,8 +1,7 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useState } from "react";
-import { Brain, MessageSquare, Plus, Search, Trash2, X } from "lucide-react";
+import { MessageSquare, Plus, Search, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -77,46 +76,44 @@ export function Sidebar({
 
       <div
         className={cn(
-          "fixed inset-y-0 left-0 z-50 flex h-full w-[320px] flex-col border-r border-white/8 bg-[linear-gradient(180deg,rgba(255,255,255,0.025),rgba(255,255,255,0.01))] pt-safe backdrop-blur",
-          "md:relative md:z-auto md:w-[320px] md:shrink-0"
+          "fixed inset-y-0 left-0 z-50 flex h-full w-[296px] flex-col border-r border-white/8 bg-[linear-gradient(180deg,rgba(255,255,255,0.025),rgba(255,255,255,0.01))] pt-safe backdrop-blur",
+          "md:relative md:z-auto md:w-[288px] md:shrink-0"
         )}
       >
-        <div className="flex items-start justify-between px-5 pb-5 pt-6">
-          <div>
-            <div className="ember-wordmark text-4xl font-semibold tracking-tight">
-              EMBER
-            </div>
+        <div className="flex items-start justify-between px-4 pb-4 pt-5">
+          <div className="ember-wordmark text-[2rem] font-semibold tracking-tight">
+            EMBER
           </div>
           <div className="flex items-center gap-2">
             <Button
               onClick={handleNew}
               variant="ghost"
               size="icon"
-              className="h-11 w-11 rounded-full border border-white/10 bg-white/[0.03] text-zinc-200 hover:bg-white/[0.08] hover:text-white"
+              className="h-10 w-10 rounded-full border border-white/10 bg-white/[0.03] text-zinc-200 hover:bg-white/[0.08] hover:text-white"
             >
-              <Plus className="h-5 w-5" />
+              <Plus className="h-4 w-4" />
             </Button>
             <Button
               variant="ghost"
               size="icon"
               onClick={onClose}
-              className="h-11 w-11 rounded-full border border-white/10 bg-white/[0.03] text-zinc-300 hover:bg-white/[0.08] hover:text-white md:hidden"
+              className="h-10 w-10 rounded-full border border-white/10 bg-white/[0.03] text-zinc-300 hover:bg-white/[0.08] hover:text-white md:hidden"
             >
-              <X className="h-5 w-5" />
+              <X className="h-4 w-4" />
             </Button>
           </div>
         </div>
 
-        <div className="px-5 pb-4">
-          <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
-            <Search className="h-4 w-4 shrink-0 text-zinc-600" />
+        <div className="px-4 pb-3">
+          <div className="flex items-center gap-3 rounded-[18px] border border-white/10 bg-white/[0.04] px-3.5 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
+            <Search className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
             <input
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search conversations..."
               autoComplete="off"
-              className="w-full bg-transparent text-sm text-zinc-200 placeholder:text-zinc-500 focus:outline-none"
+              className="w-full bg-transparent text-[13px] text-zinc-200 placeholder:text-zinc-500 focus:outline-none"
             />
             {query ? (
               <button
@@ -131,11 +128,11 @@ export function Sidebar({
           </div>
         </div>
 
-        <div className="px-5 pb-3 text-[11px] uppercase tracking-[0.3em] text-zinc-600">
+        <div className="px-4 pb-2 text-[10px] uppercase tracking-[0.28em] text-zinc-600">
           {query ? "Search Results" : "Recent Conversations"}
         </div>
 
-        <div className="scrollbar-hide flex-1 overflow-y-auto px-3 pb-safe">
+        <div className="scrollbar-hide flex-1 overflow-y-auto px-2.5 pb-safe">
           {filteredConversations.length === 0 ? (
             <div className="flex h-full min-h-[240px] flex-col items-center justify-center px-6 text-center">
               <p className="text-sm text-zinc-400">
@@ -153,14 +150,14 @@ export function Sidebar({
                   if (e.key === "Enter") handleSelect(conv.id);
                 }}
                 className={cn(
-                  "group mb-1.5 flex min-h-[52px] items-center gap-3 rounded-2xl border px-3 py-3 text-sm transition-colors cursor-pointer",
+                  "group mb-1.5 flex min-h-[48px] items-center gap-3 rounded-[18px] border px-3 py-2.5 text-[13px] transition-colors cursor-pointer",
                   activeId === conv.id
                     ? "border-orange-500/20 bg-white/[0.08] text-zinc-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
                     : "border-transparent text-zinc-400 hover:border-white/6 hover:bg-white/[0.04] hover:text-zinc-200"
                 )}
               >
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-white/8 bg-black/40">
-                  <MessageSquare className="h-4 w-4 text-zinc-500" />
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/8 bg-black/40">
+                  <MessageSquare className="h-3.5 w-3.5 text-zinc-500" />
                 </div>
                 <div className="min-w-0 flex-1">
                   <span className="block truncate font-medium">{conv.title}</span>
@@ -186,18 +183,8 @@ export function Sidebar({
 
         <div className="border-t border-white/8 px-4 py-4">
           <Button
-            asChild
             variant="ghost"
-            className="mb-3 w-full justify-start gap-3 rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-6 text-zinc-300 hover:bg-white/[0.07] hover:text-white"
-          >
-            <Link href="/memories">
-              <Brain className="h-4 w-4 text-orange-300" />
-              <span>Memories</span>
-            </Link>
-          </Button>
-          <Button
-            variant="ghost"
-            className="w-full justify-center gap-2 rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-6 text-zinc-400 hover:bg-white/[0.07] hover:text-red-300"
+            className="w-full justify-center gap-2 rounded-[18px] border border-white/8 bg-white/[0.03] px-4 py-5 text-[13px] text-zinc-400 hover:bg-white/[0.07] hover:text-red-300"
             disabled={conversations.length === 0}
             onClick={onDeleteAll}
           >

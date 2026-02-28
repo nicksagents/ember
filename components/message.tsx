@@ -40,50 +40,48 @@ export function Message({ message }: MessageProps) {
       <div
         className={cn(
           "w-full",
-          isUser
-            ? "max-w-[min(100%,26rem)]"
-            : "max-w-3xl"
+          isUser ? "max-w-[min(100%,24rem)]" : "max-w-[44rem]"
         )}
       >
         <div
           className={cn(
             "whitespace-pre-wrap break-words",
             isUser
-              ? "rounded-[1.7rem] border border-white/10 bg-white/[0.08] px-5 py-3 text-lg text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
-              : "text-[1.05rem] leading-8 text-zinc-100"
+              ? "rounded-[1.45rem] border border-white/10 bg-white/[0.08] px-4 py-2.5 text-[15px] leading-6 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
+              : "text-[15px] leading-7 text-zinc-100"
           )}
         >
           {message.content}
         </div>
         {meta ? (
-          <div className="mt-5 flex flex-wrap items-center gap-3 text-sm text-zinc-500">
+          <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-zinc-500">
             {meta.model ? (
-              <span className="inline-flex items-center gap-2 rounded-full bg-white/[0.05] px-3 py-1.5 text-zinc-300">
-                <Box className="h-3.5 w-3.5" />
+              <span className="inline-flex items-center gap-2 rounded-full bg-white/[0.05] px-2.5 py-1 text-zinc-300">
+                <Box className="h-3 w-3" />
                 {meta.model}
               </span>
             ) : null}
             {meta.contextTokens ? (
               <span className="inline-flex items-center gap-1.5">
-                <Waypoints className="h-3.5 w-3.5" />
+                <Waypoints className="h-3 w-3" />
                 {formatCompactNumber(meta.contextTokens)} ctx
               </span>
             ) : null}
             {renderedTokenCount ? (
               <span className="inline-flex items-center gap-1.5">
-                <Braces className="h-3.5 w-3.5" />
+                <Braces className="h-3 w-3" />
                 {formatCompactNumber(renderedTokenCount)} tokens
               </span>
             ) : null}
             {meta.elapsedMs ? (
               <span className="inline-flex items-center gap-1.5">
-                <Timer className="h-3.5 w-3.5" />
+                <Timer className="h-3 w-3" />
                 {formatDuration(meta.elapsedMs)}
               </span>
             ) : null}
             {meta.tokensPerSecond ? (
               <span className="inline-flex items-center gap-1.5">
-                <Gauge className="h-3.5 w-3.5" />
+                <Gauge className="h-3 w-3" />
                 {formatRate(meta.tokensPerSecond)}
               </span>
             ) : null}

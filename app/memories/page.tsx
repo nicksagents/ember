@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Header } from "@/components/header";
 import { MemoryGraph } from "@/components/memory-graph";
+import { Header } from "@/components/header";
 import { Button } from "@/components/ui/button";
 
 type MemoryNode = {
@@ -26,30 +26,32 @@ type MemoryGraphData = {
   total?: number;
 };
 
-const TYPE_OPTIONS = ["identity", "preference", "workflow", "project", "reference"];
+const TYPE_OPTIONS = [
+  "identity",
+  "preference",
+  "workflow",
+  "project",
+  "reference",
+  "cluster",
+];
 
 export default function MemoriesPage() {
   const [graph, setGraph] = useState<MemoryGraphData>({ nodes: [], links: [] });
   const [selected, setSelected] = useState<MemoryNode | null>(null);
-  const [loading, setLoading] = useState(false);
   const [draft, setDraft] = useState<MemoryNode | null>(null);
   const [tagInput, setTagInput] = useState("");
+  const [loading, setLoading] = useState(false);
   const [summaryBusy, setSummaryBusy] = useState(false);
-  const [nodeLimit, setNodeLimit] = useState(800);
-  const [liteMode, setLiteMode] = useState(true);
+  const [nodeLimit, setNodeLimit] = useState(900);
 
   const fetchGraph = async () => {
     setLoading(true);
     try {
-      const params = new URLSearchParams({
-        limit: String(nodeLimit),
-        links: liteMode ? "0" : "1",
+      const res = await fetch(`/api/memories/graph?limit=${nodeLimit}&links=1`, {
+        cache: "no-store",
       });
-      const res = await fetch(`/api/memories/graph?${params}`);
       const data = await res.json();
-      if (res.ok) {
-        setGraph(data);
-      }
+      if (res.ok) setGraph(data);
     } finally {
       setLoading(false);
     }
@@ -57,7 +59,7 @@ export default function MemoriesPage() {
 
   useEffect(() => {
     void fetchGraph();
-  }, [liteMode, nodeLimit]);
+  }, [nodeLimit]);
 
   useEffect(() => {
     setDraft(selected ? { ...selected } : null);
@@ -65,21 +67,24 @@ export default function MemoriesPage() {
   }, [selected]);
 
   const stats = useMemo(() => {
-    const total = graph.nodes.length;
-    const pinned = graph.nodes.filter((n) => n.tags.includes("pin")).length;
-    const confirmed = graph.nodes.filter((n) => n.confirmed).length;
-    return { total, pinned, confirmed, all: graph.total ?? total };
-  }, [graph.nodes]);
+    const total = graph.total ?? graph.nodes.length;
+    return {
+      visible: graph.nodes.length,
+      total,
+      connected: graph.links.length,
+      pinned: graph.nodes.filter((node) => node.tags.includes("pin")).length,
+    };
+  }, [graph]);
 
   const connections = useMemo(() => {
     if (!selected) return [];
     const relatedIds = new Set<string>();
-    graph.links.forEach((link) => {
+    for (const link of graph.links) {
       if (link.source === selected.id) relatedIds.add(link.target);
       if (link.target === selected.id) relatedIds.add(link.source);
-    });
-    return graph.nodes.filter((node) => relatedIds.has(node.id)).slice(0, 6);
-  }, [graph.links, graph.nodes, selected]);
+    }
+    return graph.nodes.filter((node) => relatedIds.has(node.id)).slice(0, 8);
+  }, [graph, selected]);
 
   const handleSave = async () => {
     if (!draft) return;
@@ -130,7 +135,7 @@ export default function MemoriesPage() {
 
   const handleSummarize = async () => {
     if (!selected || summaryBusy) return;
-    const ids = [selected.id, ...connections.map((c) => c.id)];
+    const ids = [selected.id, ...connections.map((node) => node.id)];
     setSummaryBusy(true);
     try {
       const res = await fetch("/api/memories", {
@@ -159,71 +164,42 @@ export default function MemoriesPage() {
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-1 flex-col bg-[#05050a]">
-      <Header title="Memory Graph" showBack />
-      <div className="relative flex flex-1">
-        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(88,101,242,0.2),transparent_40%),radial-gradient(circle_at_80%_10%,rgba(255,59,247,0.18),transparent_35%),radial-gradient(circle_at_60%_80%,rgba(110,255,139,0.16),transparent_40%)]" />
-        <div className="pointer-events-none absolute inset-0 mix-blend-screen opacity-40" style={{ backgroundImage: "linear-gradient(rgba(255,255,255,0.04) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.04) 1px, transparent 1px)", backgroundSize: "60px 60px" }} />
+    <div className="flex h-full min-h-0 flex-1 flex-col bg-[#050505]">
+      <Header title="Memory Network" showBack />
+      <div className="relative flex min-h-0 flex-1 overflow-hidden">
+        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_40%,rgba(251,146,60,0.08),transparent_30%),radial-gradient(circle_at_68%_26%,rgba(239,68,68,0.06),transparent_24%),linear-gradient(180deg,rgba(255,255,255,0.02),transparent_25%)]" />
         <div className="absolute inset-0">
           <MemoryGraph graph={graph} onSelect={setSelected} />
         </div>
 
-        <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between px-4 pt-4">
-          <div className="pointer-events-auto rounded-2xl border border-white/10 bg-black/60 px-4 py-3 text-sm text-zinc-200 shadow-[0_0_30px_rgba(99,102,241,0.25)] backdrop-blur">
-            <div className="text-xs uppercase tracking-[0.3em] text-zinc-500">
-              Memory System
+        <div className="pointer-events-none absolute inset-x-0 top-0 flex flex-wrap items-start justify-between gap-3 px-4 py-4 sm:px-5">
+          <div className="pointer-events-auto rounded-[22px] border border-white/10 bg-black/55 px-4 py-3 text-xs text-zinc-300 backdrop-blur">
+            <div className="text-[10px] uppercase tracking-[0.28em] text-zinc-600">
+              Agent Memory
             </div>
-            <div className="mt-2 flex gap-4 text-[10px] sm:text-xs">
-              <span>
-                Showing: {stats.total}
-                {stats.all > stats.total ? ` of ${stats.all}` : ""}
-              </span>
-              <span>Pinned: {stats.pinned}</span>
-              <span>Confirmed: {stats.confirmed}</span>
-            </div>
-            <div className="mt-3 flex flex-wrap gap-2 text-[10px] sm:text-xs text-zinc-400">
-              <span className="flex items-center gap-1">
-                <span className="h-2 w-2 rounded-full bg-[#00f5ff]" /> Identity
-              </span>
-              <span className="flex items-center gap-1">
-                <span className="h-2 w-2 rounded-full bg-[#ff3df7]" /> Preference
-              </span>
-              <span className="flex items-center gap-1">
-                <span className="h-2 w-2 rounded-full bg-[#6eff8b]" /> Workflow
-              </span>
-              <span className="flex items-center gap-1">
-                <span className="h-2 w-2 rounded-full bg-[#ffa94d]" /> Project
-              </span>
-              <span className="flex items-center gap-1">
-                <span className="h-2 w-2 rounded-full bg-[#9d4dff]" /> Reference
-              </span>
-              <span className="flex items-center gap-1">
-                <span className="h-2 w-2 rounded-full bg-[#ffffff]" /> Cluster
-              </span>
+            <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
+              <span>Visible {stats.visible}</span>
+              <span>Total {stats.total}</span>
+              <span>Links {stats.connected}</span>
+              <span>Pinned {stats.pinned}</span>
             </div>
           </div>
+
           <div className="pointer-events-auto flex items-center gap-2">
             <select
               value={String(nodeLimit)}
               onChange={(e) => setNodeLimit(Number.parseInt(e.target.value, 10))}
-              className="h-9 rounded-md border border-white/10 bg-white/5 px-2 text-xs text-white"
+              className="h-9 rounded-xl border border-white/10 bg-black/60 px-3 text-xs text-zinc-200 outline-none"
             >
-              <option value="300">300 nodes</option>
-              <option value="800">800 nodes</option>
-              <option value="1500">1500 nodes</option>
-              <option value="3000">3000 nodes</option>
+              <option value="400">400 nodes</option>
+              <option value="900">900 nodes</option>
+              <option value="1800">1800 nodes</option>
+              <option value="3200">3200 nodes</option>
               <option value="5000">5000 nodes</option>
             </select>
             <Button
               variant="outline"
-              className="border-white/10 bg-white/5 text-white hover:bg-white/10"
-              onClick={() => setLiteMode((prev) => !prev)}
-            >
-              {liteMode ? "Links off" : "Links on"}
-            </Button>
-            <Button
-              variant="outline"
-              className="border-white/10 bg-white/5 text-white hover:bg-white/10"
+              className="h-9 rounded-xl border-white/10 bg-black/60 px-3 text-xs text-zinc-200 hover:bg-white/10"
               onClick={() => void fetchGraph()}
               disabled={loading}
             >
@@ -231,7 +207,7 @@ export default function MemoriesPage() {
             </Button>
             <Button
               variant="outline"
-              className="border-red-400/40 text-red-200 hover:bg-red-500/20"
+              className="h-9 rounded-xl border-red-500/20 bg-black/60 px-3 text-xs text-red-200 hover:bg-red-500/10"
               onClick={() => void handleDeleteAll()}
               disabled={graph.nodes.length === 0}
             >
@@ -240,16 +216,21 @@ export default function MemoriesPage() {
           </div>
         </div>
 
-        <div className="pointer-events-none absolute bottom-4 right-4 w-[320px]">
-          <div className="pointer-events-auto rounded-2xl border border-white/10 bg-black/70 p-4 text-sm text-zinc-200 shadow-[0_0_40px_rgba(236,72,153,0.18)] backdrop-blur">
+        <div className="pointer-events-none absolute bottom-4 right-4 w-[340px] max-w-[calc(100%-2rem)]">
+          <div className="pointer-events-auto rounded-[24px] border border-white/10 bg-black/70 p-4 text-sm text-zinc-200 backdrop-blur">
             {!draft ? (
-              <div className="text-zinc-500">
-                Click a memory bubble to inspect or edit.
+              <div>
+                <div className="text-[10px] uppercase tracking-[0.28em] text-zinc-600">
+                  Selected Memory
+                </div>
+                <p className="mt-3 text-sm leading-6 text-zinc-400">
+                  Click a node in the network to inspect or edit that memory.
+                </p>
               </div>
             ) : (
               <div className="flex flex-col gap-3">
-                <div className="text-xs uppercase tracking-[0.3em] text-zinc-500">
-                  Memory Detail
+                <div className="text-[10px] uppercase tracking-[0.28em] text-zinc-600">
+                  Selected Memory
                 </div>
                 <textarea
                   value={draft.content}
@@ -258,10 +239,10 @@ export default function MemoriesPage() {
                       prev ? { ...prev, content: e.target.value } : prev
                     )
                   }
-                  className="h-28 w-full resize-none rounded-xl border border-white/10 bg-black/40 p-2 text-sm text-white focus:outline-none"
+                  className="h-28 w-full resize-none rounded-2xl border border-white/10 bg-white/[0.03] p-3 text-sm text-zinc-100 outline-none"
                 />
-              <div className="flex items-center gap-2">
-                  <label className="text-xs text-zinc-400">Type</label>
+                <div className="grid grid-cols-[auto_1fr] items-center gap-2">
+                  <label className="text-xs text-zinc-500">Type</label>
                   <select
                     value={draft.type}
                     onChange={(e) =>
@@ -269,7 +250,7 @@ export default function MemoriesPage() {
                         prev ? { ...prev, type: e.target.value } : prev
                       )
                     }
-                    className="flex-1 rounded-lg border border-white/10 bg-black/40 p-2 text-xs text-white"
+                    className="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-zinc-100 outline-none"
                   >
                     {TYPE_OPTIONS.map((type) => (
                       <option key={type} value={type}>
@@ -278,16 +259,16 @@ export default function MemoriesPage() {
                     ))}
                   </select>
                 </div>
-                <div className="flex flex-col gap-1">
-                  <label className="text-xs text-zinc-400">Tags</label>
+                <div className="grid gap-1">
+                  <label className="text-xs text-zinc-500">Tags</label>
                   <input
                     value={tagInput}
                     onChange={(e) => setTagInput(e.target.value)}
                     placeholder="pin, project, workflow"
-                    className="w-full rounded-lg border border-white/10 bg-black/40 px-2 py-1.5 text-xs text-white"
+                    className="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-zinc-100 outline-none"
                   />
                 </div>
-                <div className="flex items-center gap-2 text-xs text-zinc-400">
+                <div className="flex flex-wrap items-center gap-4 text-xs text-zinc-400">
                   <label className="flex items-center gap-2">
                     <input
                       type="checkbox"
@@ -312,40 +293,41 @@ export default function MemoriesPage() {
                     />
                     Approved
                   </label>
-                  <span className="ml-auto">Confidence {draft.confidence.toFixed(2)}</span>
                 </div>
-                <div className="text-xs text-zinc-500">
-                  Uses {draft.useCount} · {draft.lastUsed ? `Last used ${draft.lastUsed}` : "Never used"}
+                <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-500">
+                  <span>Confidence {draft.confidence.toFixed(2)}</span>
+                  <span>Uses {draft.useCount}</span>
+                  <span>{draft.lastUsed ? `Last used ${draft.lastUsed}` : "Never used"}</span>
                 </div>
-                {connections.length > 0 && (
-                  <div className="rounded-xl border border-white/10 bg-black/30 p-2 text-xs text-zinc-300">
-                    <div className="mb-1 text-[11px] uppercase tracking-[0.2em] text-zinc-500">
-                      Connected
+                {connections.length > 0 ? (
+                  <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-3">
+                    <div className="mb-2 text-[10px] uppercase tracking-[0.24em] text-zinc-600">
+                      Connected Memories
                     </div>
-                    <div className="flex flex-col gap-1">
+                    <div className="space-y-1.5">
                       {connections.map((node) => (
                         <button
                           key={node.id}
                           type="button"
-                          className="truncate text-left text-cyan-200 hover:text-cyan-100"
                           onClick={() => setSelected(node)}
+                          className="block w-full truncate text-left text-xs text-orange-200 transition hover:text-orange-100"
                         >
                           {node.content}
                         </button>
                       ))}
                     </div>
                   </div>
-                )}
+                ) : null}
                 <div className="flex gap-2">
                   <Button
-                    className="flex-1 bg-cyan-500 text-black hover:bg-cyan-400"
+                    className="flex-1 rounded-xl bg-orange-500 text-black hover:bg-orange-400"
                     onClick={() => void handleSave()}
                   >
                     Save
                   </Button>
                   <Button
                     variant="outline"
-                    className="border-red-400/40 text-red-300 hover:bg-red-500/20"
+                    className="rounded-xl border-red-500/20 text-red-200 hover:bg-red-500/10"
                     onClick={() => void handleDelete()}
                   >
                     Delete
@@ -353,7 +335,7 @@ export default function MemoriesPage() {
                 </div>
                 <Button
                   variant="outline"
-                  className="border-white/20 text-zinc-100 hover:bg-white/10"
+                  className="rounded-xl border-white/10 bg-white/[0.03] text-zinc-100 hover:bg-white/10"
                   onClick={() => void handleSummarize()}
                   disabled={summaryBusy}
                 >

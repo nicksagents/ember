@@ -26,9 +26,6 @@ export function Chat({
 }: ChatProps) {
   const [messages, setMessages] = useState<MessageData[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [liveSteps, setLiveSteps] = useState<string[]>([]);
-  const [loadingConversationId, setLoadingConversationId] = useState<string | null>(null);
-  const [requestStartedAt, setRequestStartedAt] = useState<number | null>(null);
   const [activeModelLabel, setActiveModelLabel] = useState<string>("");
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -49,8 +46,7 @@ export function Chat({
         const res = await fetch("/api/config");
         const data = await res.json();
         if (!res.ok || cancelled) return;
-        const model =
-          data?.modelRoles?.assistant || data?.model || "";
+        const model = data?.modelRoles?.assistant || data?.model || "";
         if (model) setActiveModelLabel(model);
       } catch {}
     };
@@ -60,7 +56,6 @@ export function Chat({
     };
   }, []);
 
-  // Load messages when conversation changes
   useEffect(() => {
     if (!conversationId) {
       setMessages([]);
@@ -96,54 +91,13 @@ export function Chat({
           .reverse()
           .find((entry) => entry.role === "assistant" && entry.meta?.model)
           ?.meta?.model;
-        if (latestModel) {
-          setActiveModelLabel(latestModel);
-        }
+        if (latestModel) setActiveModelLabel(latestModel);
       } catch {
         setMessages([]);
       }
     };
     void loadMessages();
   }, [conversationId]);
-
-  useEffect(() => {
-    if (!isLoading || !loadingConversationId) return;
-    let cancelled = false;
-
-    const pollStatus = async () => {
-      try {
-        const res = await fetch(
-          `/api/chat/status?conversationId=${encodeURIComponent(loadingConversationId)}`,
-          { cache: "no-store" }
-        );
-        if (!res.ok) return;
-        const data: { steps?: Array<{ text?: string }> } = await res.json();
-        if (cancelled) return;
-        const steps = Array.isArray(data?.steps)
-          ? data.steps
-              .map((step) =>
-                step && typeof step.text === "string" ? step.text : ""
-              )
-              .filter(Boolean)
-          : [];
-        if (steps.length > 0) {
-          setLiveSteps(steps.slice(-6));
-        }
-      } catch {
-        // Ignore status polling errors, the main request is still authoritative.
-      }
-    };
-
-    void pollStatus();
-    const timer = setInterval(() => {
-      void pollStatus();
-    }, 1000);
-
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [isLoading, loadingConversationId]);
 
   const handleSend = useCallback(
     async (content: string) => {
@@ -169,12 +123,8 @@ export function Chat({
         createdAt: new Date().toISOString(),
       };
 
-      // Optimistic update using functional state (no stale closure)
       setMessages((prev) => [...prev, userMessage]);
       setIsLoading(true);
-      setLoadingConversationId(activeId);
-      setLiveSteps(["Queued request"]);
-      setRequestStartedAt(Date.now());
 
       try {
         const res = await fetch("/api/chat", {
@@ -213,9 +163,6 @@ export function Chat({
         setMessages((prev) => [...prev, errorMessage]);
       } finally {
         setIsLoading(false);
-        setLoadingConversationId(null);
-        setRequestStartedAt(null);
-        setLiveSteps([]);
       }
     },
     [conversationId, onConversationUpdate, onEnsureConversation]
@@ -229,34 +176,21 @@ export function Chat({
       >
         {messages.length === 0 ? (
           <div className="flex min-h-full flex-col items-center justify-center px-4 text-center">
-            <h2 className="ember-wordmark text-5xl font-semibold tracking-tight sm:text-7xl">
+            <h2 className="ember-wordmark text-4xl font-semibold tracking-tight sm:text-5xl">
               EMBER
             </h2>
-            <p className="mt-5 max-w-2xl text-lg text-zinc-500 sm:text-2xl">
+            <p className="mt-4 max-w-xl text-base text-zinc-500 sm:text-lg">
               Type a message to get started
             </p>
           </div>
         ) : (
-          <div className="mx-auto flex w-full max-w-5xl flex-col gap-8 pb-8 pt-6 sm:pt-10">
+          <div className="mx-auto flex w-full max-w-[56rem] flex-col gap-6 pb-6 pt-5 sm:pt-7">
             {messages.map((msg) => (
               <Message key={msg.id} message={msg} />
             ))}
             {isLoading && (
               <div className="flex justify-start">
-                <div className="rounded-2xl bg-zinc-800 px-4 py-2.5 text-sm text-zinc-400">
-                  <div className="text-xs font-medium text-zinc-300">
-                    Agent is working
-                    {requestStartedAt
-                      ? ` (${Math.floor((Date.now() - requestStartedAt) / 1000)}s)`
-                      : ""}
-                  </div>
-                  {liveSteps.length > 0 && (
-                    <div className="mt-2 space-y-1 text-xs text-zinc-400">
-                      {liveSteps.map((step, index) => (
-                        <div key={`${index}-${step}`}>- {step}</div>
-                      ))}
-                    </div>
-                  )}
+                <div className="rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-xs text-zinc-400">
                   <span className="inline-flex gap-1">
                     <span className="animate-bounce text-orange-300">·</span>
                     <span
@@ -279,13 +213,13 @@ export function Chat({
         )}
       </div>
       <div className="px-4 pb-4 sm:px-6 sm:pb-6">
-        <div className="mx-auto w-full max-w-4xl">
+        <div className="mx-auto w-full max-w-[52rem]">
           <ChatInput
             onSend={handleSend}
             disabled={isLoading || (!conversationId && !onEnsureConversation)}
             modelLabel={activeModelLabel}
           />
-          <p className="mt-4 text-center text-sm text-zinc-600">
+          <p className="mt-3 text-center text-xs text-zinc-600">
             Press <span className="rounded bg-white/[0.04] px-2 py-1">Enter</span>{" "}
             to send,{" "}
             <span className="rounded bg-white/[0.04] px-2 py-1">
