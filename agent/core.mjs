@@ -340,6 +340,19 @@ function formatToolFallback(name, result) {
   return "";
 }
 
+function looksLikeActionPreface(content) {
+  const text = String(content || "").trim().toLowerCase();
+  if (!text) return false;
+  return [
+    /\blet me\b.*\b(?:check|look|inspect|explore|review|read|open|search|scan|go through)\b/,
+    /\bi(?:'ll| will)\b.*\b(?:check|look|inspect|explore|review|read|open|search|scan|go through)\b/,
+    /\bfirst[, ]+\bi(?:'ll| will)\b/,
+    /\bi(?:'m| am)\s+going\s+to\b.*\b(?:check|look|inspect|explore|review|read|open|search|scan)\b/,
+    /\btake a look\b/,
+    /\bchecking\b.*\b(?:file|files|folder|directory|project|repo|repository|codebase|structure)\b/,
+  ].some((pattern) => pattern.test(text));
+}
+
 function hashToken(token, dim) {
   let hash = 2166136261;
   for (let i = 0; i < token.length; i += 1) {
@@ -1169,6 +1182,7 @@ export async function runToolLoop({
   completionGuard = null,
   buildVerifyPrompt = null,
   toolCallGuard = null,
+  onAssistantMessage = null,
 }) {
   let llmResponse = await callLLM(payload);
   let assistantContent = "";
@@ -1184,6 +1198,18 @@ export async function runToolLoop({
   for (let round = 0; round < maxToolRounds; round++) {
     const choice = llmResponse?.choices?.[0];
     const message = choice?.message;
+    if (
+      typeof onAssistantMessage === "function" &&
+      requireToolCall &&
+      typeof message?.content === "string" &&
+      message.content.trim()
+    ) {
+      await onAssistantMessage(message.content, {
+        round,
+        hasToolCalls: Boolean(message?.tool_calls?.length),
+        looksLikeActionPreface: looksLikeActionPreface(message.content),
+      });
+    }
     if (!message && requireToolCall && typeof fallbackToolCall === "function") {
       const fallback = await fallbackToolCall(null, payload, { phase: "execute" });
       if (fallback?.name) {
@@ -1270,6 +1296,27 @@ export async function runToolLoop({
     }
 
     let hasToolCalls = Boolean(message?.tool_calls && message.tool_calls.length > 0);
+
+    if (!hasToolCalls) {
+      const prefaceFallback =
+        typeof fallbackToolCall === "function" && looksLikeActionPreface(message?.content)
+          ? await fallbackToolCall(message, payload, { phase: "execute", reason: "preface" })
+          : null;
+      if (prefaceFallback?.name) {
+        message.tool_calls = [
+          {
+            id: `tool_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            type: "function",
+            function: {
+              name: prefaceFallback.name,
+              arguments: JSON.stringify(prefaceFallback.arguments || {}),
+            },
+          },
+        ];
+        message.content = null;
+        hasToolCalls = true;
+      }
+    }
 
     if (!hasToolCalls) {
       if (typeof completionGuard === "function") {

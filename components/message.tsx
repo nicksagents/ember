@@ -1,7 +1,12 @@
 "use client";
 
-import { Box, Braces, Gauge, Timer, Waypoints } from "lucide-react";
+import { Box, Braces, Gauge, Timer, Waypoints, Wrench } from "lucide-react";
 import { cn } from "@/lib/utils";
+
+export interface ToolTraceEntry {
+  name: string;
+  status?: "done" | "error" | null;
+}
 
 export interface MessageMeta {
   model?: string | null;
@@ -16,6 +21,8 @@ export interface MessageMeta {
   completionMs?: number | null;
   tokensPerSecond?: number | null;
   llmCalls?: number | null;
+  toolsUsed?: string[] | null;
+  toolTrace?: ToolTraceEntry[] | null;
 }
 
 export interface MessageData {
@@ -34,6 +41,9 @@ export function Message({ message }: MessageProps) {
   const isUser = message.role === "user";
   const meta = !isUser ? message.meta : null;
   const renderedTokenCount = meta?.completionTokens ?? meta?.totalTokens ?? null;
+  const toolsUsed = Array.isArray(meta?.toolsUsed)
+    ? meta.toolsUsed.filter(Boolean)
+    : [];
 
   return (
     <div className={cn("flex w-full", isUser ? "justify-end" : "justify-start")}>
@@ -85,6 +95,19 @@ export function Message({ message }: MessageProps) {
                 {formatRate(meta.tokensPerSecond)}
               </span>
             ) : null}
+          </div>
+        ) : null}
+        {!isUser && toolsUsed.length > 0 ? (
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
+            {toolsUsed.map((toolName) => (
+              <span
+                key={toolName}
+                className="inline-flex items-center gap-1.5 rounded-full border border-white/8 bg-white/[0.03] px-2.5 py-1 text-zinc-400"
+              >
+                <Wrench className="h-3 w-3" />
+                {toolName}
+              </span>
+            ))}
           </div>
         ) : null}
       </div>

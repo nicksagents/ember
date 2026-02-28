@@ -277,6 +277,21 @@ function updateChatProgress(conversationId, status, text, meta = {}) {
   chatProgressByConversation.set(conversationId, next);
 }
 
+function beginChatProgress(conversationId, text, meta = {}) {
+  if (!conversationId) return;
+  trimChatProgressStore();
+  const nowIso = new Date().toISOString();
+  const next = {
+    conversationId,
+    status: "running",
+    startedAt: nowIso,
+    updatedAt: nowIso,
+    steps: [],
+  };
+  chatProgressByConversation.set(conversationId, next);
+  updateChatProgress(conversationId, "running", text, meta);
+}
+
 function generateId(prefix) {
   const ts = Date.now();
   const rand = Math.random().toString(36).substring(2, 7);
@@ -672,6 +687,7 @@ function buildAssistantMeta({
   promptMessageCount,
   elapsedMs,
   llmCalls,
+  toolTrace,
 }) {
   const response = finalResponse && typeof finalResponse === "object" ? finalResponse : {};
   const usage = response.usage && typeof response.usage === "object" ? response.usage : {};
@@ -745,7 +761,53 @@ function buildAssistantMeta({
     tokensPerSecond:
       tokensPerSecond !== null ? Number(tokensPerSecond.toFixed(2)) : null,
     llmCalls: Math.max(1, Math.round(toFiniteNumber(llmCalls) || 1)),
+    toolsUsed: Array.isArray(toolTrace)
+      ? [...new Set(toolTrace.map((entry) => entry?.name).filter(Boolean))]
+      : [],
+    toolTrace: Array.isArray(toolTrace) ? toolTrace : [],
   };
+}
+
+function buildToolTrace(messages) {
+  const traces = [];
+  const toolCallsById = new Map();
+  for (const message of Array.isArray(messages) ? messages : []) {
+    if (message?.role === "assistant" && Array.isArray(message.tool_calls)) {
+      for (const toolCall of message.tool_calls) {
+        const id = toolCall?.id;
+        const name = toolCall?.function?.name;
+        if (!id || !name) continue;
+        toolCallsById.set(id, { name });
+      }
+      continue;
+    }
+    if (message?.role === "tool" && message?.tool_call_id) {
+      const match = toolCallsById.get(message.tool_call_id);
+      if (!match) continue;
+      let parsed = {};
+      try {
+        parsed = JSON.parse(message.content || "{}");
+      } catch {
+        parsed = {};
+      }
+      traces.push({
+        name: match.name,
+        status:
+          parsed?.error ||
+          parsed?.ok === false ||
+          parsed?.timedOut === true ||
+          (parsed?.exitCode !== undefined && parsed.exitCode !== 0)
+            ? "error"
+            : "done",
+      });
+    }
+  }
+  return traces;
+}
+
+function isQwenCoderModel(modelName) {
+  const value = String(modelName || "").toLowerCase();
+  return value.includes("qwen") && value.includes("coder");
 }
 
 async function createConversation(title) {
@@ -2303,7 +2365,9 @@ async function handleChat(req, res) {
       conversationId,
       content: userContent,
     });
-    updateChatProgress(conversationId, "running", "Queued request");
+    beginChatProgress(conversationId, "Queued request", {
+      kind: "system",
+    });
 
     const config = await loadConfig(sanitizeConfigInput(body.config));
     fsPolicy.unrestrictedShell = Boolean(config.unrestrictedShell);
@@ -2315,7 +2379,9 @@ async function handleChat(req, res) {
     await appendToConversation(conversationId, "user", userContent);
 
     // Build context with structured summary compression
-    updateChatProgress(conversationId, "running", "Preparing context");
+    updateChatProgress(conversationId, "running", "Preparing context", {
+      kind: "system",
+    });
     const summaryState = await loadConversationSummary(conversationId);
     const keepMessages = SUMMARY_KEEP_MESSAGES;
     const recentMessages =
@@ -2476,6 +2542,9 @@ async function handleChat(req, res) {
       if (/\b(?:delete|remove)\s+(?:the\s+)?(?:file|folder|directory)\b/.test(text)) return true;
       if (/\b(?:move|rename|copy)\s+(?:the\s+)?(?:file|folder|directory)\b/.test(text)) return true;
       if (/\b(?:run|execute)\s+(?:the\s+)?(?:command|script|bash|shell)\b/.test(text)) return true;
+      if (/\b(?:inspect|explore|scan|review|look\s+through|go\s+through)\b/.test(text) && /\b(?:file|files|folder|directory|project|repo|repository|codebase|source|structure)\b/.test(text)) return true;
+      if (/\b(?:see|understand|inspect|explore)\s+(?:how\s+(?:you|it)\s+work|yourself|your\s+own\s+(?:files|code|project|repo|repository|structure))\b/.test(text)) return true;
+      if (/\bfile\s+structure\b/.test(text)) return true;
       if (processTask) return true;
       if (/\b(?:create|build|scaffold|set\s*up|initialize|init)\s+(?:a\s+)?(?:new\s+)?(?:project|app|application|website|site|repo|repository)\b/.test(text)) return true;
       if (/\b(?:install|add|remove|uninstall)\s+\w/.test(text) && /\b(?:package|dependency|dep|lib|library|module|shadcn|tailwind|prisma|next|react|vue|express)\b/.test(text)) return true;
@@ -2500,7 +2569,7 @@ async function handleChat(req, res) {
     const isReadOnlyFsRequest = (() => {
       const text = userContent.toLowerCase();
       const readish =
-        /\b(?:list|show|what'?s?\s+in|whats?\s+in|read|open|view|stat|exists)\b/.test(
+        /\b(?:list|show|what'?s?\s+in|whats?\s+in|read|open|view|stat|exists|inspect|explore|scan|review|look\s+through|go\s+through)\b/.test(
           text
         );
       const writeish =
@@ -2525,12 +2594,20 @@ async function handleChat(req, res) {
       const phase = options?.phase || "execute";
 
       const wantsDesktop = text.includes("desktop");
+      const wantsWorkspace =
+        /\b(?:project|repo|repository|codebase|source|structure|how you work|yourself|your own)\b/.test(
+          text
+        );
       const listLike =
         text.includes("list") ||
         text.includes("what's in") ||
         text.includes("whats in") ||
-        (text.includes("show") && /\b(?:folder|directory|desktop|home|files?)\b/.test(text));
-      const readLike = text.includes("read") || text.includes("open");
+        /\b(?:inspect|explore|scan|review|look through|go through|file structure)\b/.test(text) ||
+        (text.includes("show") && /\b(?:folder|directory|desktop|home|files?|project|repo|repository)\b/.test(text));
+      const readLike =
+        text.includes("read") ||
+        text.includes("open") ||
+        /\b(?:inspect|explore|review|look through|go through)\b/.test(text);
       const makeDirLike =
         text.includes("mkdir") ||
         text.includes("make folder") ||
@@ -2656,6 +2733,21 @@ async function handleChat(req, res) {
         };
       }
 
+      if (listLike && wantsWorkspace) {
+        const workspaceRoot = config.workspaceRoot || process.cwd();
+        const loopState = inspectToolLoopMessages(_payload?.messages || []);
+        if (!loopState.hasUsed("list_dir")) {
+          return {
+            name: "list_dir",
+            arguments: { path: workspaceRoot },
+          };
+        }
+        return {
+          name: "read_file",
+          arguments: { path: path.join(workspaceRoot, "package.json") },
+        };
+      }
+
       if (listLike) {
         return { name: "list_dir", arguments: { path: home } };
       }
@@ -2759,7 +2851,8 @@ async function handleChat(req, res) {
       updateChatProgress(
         conversationId,
         "running",
-        `LLM call ${llmCallCount}: waiting for model`
+        `LLM call ${llmCallCount}: waiting for model`,
+        { kind: "llm", phase: "running" }
       );
       try {
         const upstream = await fetchWithTimeout(
@@ -2784,14 +2877,16 @@ async function handleChat(req, res) {
         updateChatProgress(
           conversationId,
           "running",
-          `LLM call ${llmCallCount}: response received`
+          `LLM call ${llmCallCount}: response received`,
+          { kind: "llm", phase: "done" }
         );
         return data;
       } catch (error) {
         updateChatProgress(
           conversationId,
           "running",
-          `LLM call ${llmCallCount}: failed (${error instanceof Error ? error.message : "unknown error"})`
+          `LLM call ${llmCallCount}: failed (${error instanceof Error ? error.message : "unknown error"})`,
+          { kind: "llm", phase: "error" }
         );
         throw error;
       }
@@ -2803,6 +2898,13 @@ async function handleChat(req, res) {
         "Execute using tools now. Do not describe what you would do - do it. " +
         "Use the 3-layer workflow: 1) understand, 2) execute with tools, 3) verify with tools. " +
         "Do not claim success without tool verification."
+      );
+    }
+    if (requiresTool && isQwenCoderModel(activeModel)) {
+      systemNotes.push(
+        "Qwen tool-use rule: do not stop after announcing a plan or first step. " +
+        "Continue the tool loop until the task is complete and verified. " +
+        "If you say you will inspect or check something, immediately continue with the next tool call."
       );
     }
     if (requiresTool && processTask) {
@@ -2906,7 +3008,8 @@ async function handleChat(req, res) {
         updateChatProgress(
           conversationId,
           "running",
-          describeToolProgress(name, args, null, "running")
+          describeToolProgress(name, args, null, "running"),
+          { kind: "tool", toolName: name, phase: "running" }
         );
         const result = await registry.execute(name, args);
         await logEvent("tool_result", { conversationId, name, result });
@@ -2918,7 +3021,12 @@ async function handleChat(req, res) {
           "running",
           toolError
             ? describeToolProgress(name, args, result, "error")
-            : describeToolProgress(name, args, result, "done")
+            : describeToolProgress(name, args, result, "done"),
+          {
+            kind: "tool",
+            toolName: name,
+            phase: toolError ? "error" : "done",
+          }
         );
         return result;
       },
@@ -2927,14 +3035,25 @@ async function handleChat(req, res) {
       verifyToolResults: true,
       requireToolCall: requiresTool,
       fallbackToolCall,
-      directToolOutput: requiresTool && isReadOnlyFsRequest,
+      directToolOutput: false,
       maxToolRounds,
       completionGuard,
       buildVerifyPrompt,
       toolCallGuard,
+      onAssistantMessage: async (text, info = {}) => {
+        const trimmed = String(text || "").trim();
+        if (!trimmed) return;
+        updateChatProgress(conversationId, "running", trimmed, {
+          kind: "assistant",
+          phase: info?.hasToolCalls ? "tool_call" : "speaking",
+        });
+      },
     });
     await logEvent("assistant_response", { conversationId, content: assistantContent });
-    updateChatProgress(conversationId, "running", "Assistant response ready");
+    updateChatProgress(conversationId, "running", "Assistant response ready", {
+      kind: "system",
+      phase: "done",
+    });
     const assistantMeta = buildAssistantMeta({
       finalResponse: finalResponse || lastLlmResponse,
       activeModel,
@@ -2944,6 +3063,7 @@ async function handleChat(req, res) {
       promptMessageCount,
       elapsedMs: Date.now() - llmStartedAt,
       llmCalls: llmCallCount,
+      toolTrace: buildToolTrace(payload.messages),
     });
 
     // Save assistant response to conversation
@@ -2980,7 +3100,10 @@ async function handleChat(req, res) {
     }
 
     sendJson(res, 200, { content: assistantContent, meta: assistantMeta });
-    updateChatProgress(conversationId, "completed", "Response sent");
+    updateChatProgress(conversationId, "completed", "Response sent", {
+      kind: "system",
+      phase: "done",
+    });
 
     if (pendingSummary) {
       summarizeConversationHistory(
@@ -3006,7 +3129,8 @@ async function handleChat(req, res) {
       updateChatProgress(
         activeConversationId,
         "failed",
-        `Request failed: ${error instanceof Error ? error.message : "Unknown error"}`
+        `Request failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+        { kind: "system", phase: "error" }
       );
     }
     if (handleBodyErrors(res, error)) return;

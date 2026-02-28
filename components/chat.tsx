@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
+import { Activity, CheckCircle2, LoaderCircle, Wrench, XCircle } from "lucide-react";
 import {
   Message,
   type MessageData,
@@ -21,6 +22,20 @@ interface ChatProps {
   onThinkingChange?: (thinking: boolean) => void;
 }
 
+interface ChatProgressStep {
+  ts?: string;
+  text: string;
+  kind?: string;
+  toolName?: string;
+  phase?: string;
+}
+
+interface ChatProgressState {
+  conversationId: string;
+  status: string;
+  steps: ChatProgressStep[];
+}
+
 export function Chat({
   conversationId,
   onConversationUpdate,
@@ -31,6 +46,7 @@ export function Chat({
   const [messages, setMessages] = useState<MessageData[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [activeModelLabel, setActiveModelLabel] = useState<string>("");
+  const [progress, setProgress] = useState<ChatProgressState | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = useCallback(() => {
@@ -74,6 +90,7 @@ export function Chat({
   useEffect(() => {
     if (!conversationId) {
       setMessages([]);
+      setProgress(null);
       return;
     }
     const loadMessages = async () => {
@@ -114,6 +131,45 @@ export function Chat({
     void loadMessages();
   }, [conversationId]);
 
+  useEffect(() => {
+    if (!isLoading || !conversationId) {
+      setProgress(null);
+      return;
+    }
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const poll = async () => {
+      try {
+        const res = await fetch(
+          `/api/chat/status?conversationId=${encodeURIComponent(conversationId)}`,
+          { cache: "no-store" }
+        );
+        const data = await res.json();
+        if (!res.ok || cancelled) return;
+        setProgress({
+          conversationId: data.conversationId || conversationId,
+          status: data.status || "running",
+          steps: Array.isArray(data.steps) ? data.steps : [],
+        });
+      } catch {
+        if (cancelled) return;
+      } finally {
+        if (!cancelled) {
+          timer = setTimeout(poll, 800);
+        }
+      }
+    };
+
+    void poll();
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [conversationId, isLoading]);
+
   const handleSend = useCallback(
     async (content: string) => {
       let activeId = conversationId;
@@ -140,6 +196,11 @@ export function Chat({
 
       setMessages((prev) => [...prev, userMessage]);
       setIsLoading(true);
+      setProgress({
+        conversationId: activeId,
+        status: "running",
+        steps: [{ text: "Queued request", kind: "system" }],
+      });
 
       try {
         const res = await fetch("/api/chat", {
@@ -203,27 +264,7 @@ export function Chat({
             {messages.map((msg) => (
               <Message key={msg.id} message={msg} />
             ))}
-            {isLoading && (
-              <div className="flex justify-start">
-                <div className="rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-xs text-zinc-400">
-                  <span className="inline-flex gap-1">
-                    <span className="animate-bounce text-orange-300">·</span>
-                    <span
-                      className="animate-bounce"
-                      style={{ animationDelay: "0.1s" }}
-                    >
-                      ·
-                    </span>
-                    <span
-                      className="animate-bounce"
-                      style={{ animationDelay: "0.2s" }}
-                    >
-                      ·
-                    </span>
-                  </span>
-                </div>
-              </div>
-            )}
+            {isLoading ? <ChatProgressPanel progress={progress} /> : null}
           </div>
         )}
       </div>
@@ -246,6 +287,63 @@ export function Chat({
               for a new line
             </p>
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ChatProgressPanel({
+  progress,
+}: {
+  progress: ChatProgressState | null;
+}) {
+  const steps = Array.isArray(progress?.steps) ? progress.steps.slice(-8) : [];
+
+  return (
+    <div className="flex justify-start">
+      <div className="w-full max-w-[40rem] rounded-[1.25rem] border border-white/10 bg-white/[0.035] px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
+        <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.24em] text-zinc-500">
+          <LoaderCircle className="h-3.5 w-3.5 animate-spin text-orange-300" />
+          Agent Activity
+        </div>
+        <div className="mt-3 space-y-2">
+          {steps.length > 0 ? (
+            steps.map((step, index) => (
+              <div
+                key={`${step.ts || "step"}-${index}`}
+                className="flex items-start gap-2.5 text-sm text-zinc-300"
+              >
+                <div className="mt-0.5 shrink-0 text-zinc-500">
+                  {step.kind === "tool" ? (
+                    step.phase === "error" ? (
+                      <XCircle className="h-3.5 w-3.5 text-red-300" />
+                    ) : step.phase === "done" ? (
+                      <CheckCircle2 className="h-3.5 w-3.5 text-orange-300" />
+                    ) : (
+                      <Wrench className="h-3.5 w-3.5 text-orange-300" />
+                    )
+                  ) : (
+                    <Activity className="h-3.5 w-3.5" />
+                  )}
+                </div>
+                <div className="min-w-0">
+                  {step.toolName ? (
+                    <div className="mb-1 inline-flex items-center gap-1.5 rounded-full bg-white/[0.05] px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-zinc-400">
+                      <Wrench className="h-3 w-3" />
+                      {step.toolName}
+                    </div>
+                  ) : null}
+                  <p className="leading-6 text-zinc-300">{step.text}</p>
+                </div>
+              </div>
+            ))
+          ) : (
+            <div className="flex items-center gap-2 text-sm text-zinc-400">
+              <LoaderCircle className="h-3.5 w-3.5 animate-spin text-orange-300" />
+              Waiting for the agent to respond
+            </div>
+          )}
         </div>
       </div>
     </div>

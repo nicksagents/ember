@@ -266,6 +266,114 @@ test("runToolLoop prompts for continuation after a successful tool round", async
   );
 });
 
+test("runToolLoop converts action-preface replies into fallback tool execution", async () => {
+  const payload = { messages: [] };
+  let callCount = 0;
+  const fallbackPhases = [];
+  const callLLM = async () => {
+    callCount += 1;
+    if (callCount === 1) {
+      return {
+        choices: [
+          {
+            message: {
+              content: "Let me inspect the project structure and check the files.",
+            },
+          },
+        ],
+      };
+    }
+    return {
+      choices: [
+        {
+          message: {
+            content: "I checked the project and found a Next.js app with a local agent runtime.",
+          },
+        },
+      ],
+    };
+  };
+  const executed = [];
+  const executeTool = async (name, args) => {
+    executed.push({ name, args });
+    return { path: "/tmp/project", entries: [{ name: "package.json" }] };
+  };
+  const fallbackToolCall = async (_message, _payload, options = {}) => {
+    fallbackPhases.push(options.phase || "");
+    return {
+      name: "list_dir",
+      arguments: { path: "/tmp/project" },
+    };
+  };
+
+  const result = await runToolLoop({
+    payload,
+    callLLM,
+    executeTool,
+    fallbackToolCall,
+    maxToolRounds: 3,
+  });
+
+  assert.equal(
+    result.assistantContent,
+    "I checked the project and found a Next.js app with a local agent runtime."
+  );
+  assert.equal(executed.length, 1);
+  assert.equal(executed[0].name, "list_dir");
+  assert.ok(fallbackPhases.includes("execute"));
+});
+
+test("runToolLoop emits interim assistant messages during tool-backed work", async () => {
+  const payload = { messages: [] };
+  let callCount = 0;
+  const seenAssistantMessages = [];
+  const callLLM = async () => {
+    callCount += 1;
+    if (callCount === 1) {
+      return {
+        choices: [
+          {
+            message: {
+              content: "I am checking the project files now.",
+              tool_calls: [
+                {
+                  id: "tool1",
+                  function: {
+                    name: "list_dir",
+                    arguments: JSON.stringify({ path: "/tmp/project" }),
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      };
+    }
+    return {
+      choices: [{ message: { content: "I found the files and finished the check." } }],
+    };
+  };
+  const executeTool = async () => ({ path: "/tmp/project", entries: [{ name: "package.json" }] });
+
+  const result = await runToolLoop({
+    payload,
+    callLLM,
+    executeTool,
+    maxToolRounds: 3,
+    requireToolCall: true,
+    onAssistantMessage: async (text) => {
+      seenAssistantMessages.push(text);
+    },
+  });
+
+  assert.equal(result.assistantContent, "I found the files and finished the check.");
+  assert.ok(
+    seenAssistantMessages.some((text) =>
+      String(text).includes("checking the project files")
+    )
+  );
+});
+
 test("runToolLoop supports custom verify prompts for web lookups", async () => {
   const payload = { messages: [] };
   let callCount = 0;
