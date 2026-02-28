@@ -5,6 +5,8 @@ import {
   buildSystemPrompt,
   buildContextMessages,
   runToolLoop,
+  parseLooseToolCalls,
+  looksLikeActionPreface,
   selectRelevantMemories,
   detectMemoryCandidates,
   detectMemoryInvalidations,
@@ -805,4 +807,111 @@ test("runToolLoop completionGuard can require port-free verification for stop ta
     maxToolRounds: 4,
   });
   assert.equal(result.assistantContent, "Port 3000 is free.");
+});
+
+// ── parseLooseToolCalls: bash block and narrative detection ──────────────────
+
+test("parseLooseToolCalls converts markdown bash block to run_command", () => {
+  const content = "Let me check the directory.\n\n```bash\nls -la /home/user/Desktop\n```\n\nHere are the results...";
+  const calls = parseLooseToolCalls(content);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].function.name, "run_command");
+  const args = JSON.parse(calls[0].function.arguments);
+  assert.equal(args.command, "ls -la /home/user/Desktop");
+});
+
+test("parseLooseToolCalls ignores bash block when proper tool_call exists", () => {
+  const content = '<tool_call>{"name":"list_dir","arguments":{"path":"/tmp"}}</tool_call>\n\n```bash\nls /tmp\n```';
+  const calls = parseLooseToolCalls(content);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].function.name, "list_dir");
+});
+
+test("parseLooseToolCalls skips bash blocks that look like fabricated output", () => {
+  const content = "```bash\ntotal 24\ndrwxr-xr-x 3 user user 4096 Jan 1 00:00 .\n```";
+  const calls = parseLooseToolCalls(content);
+  assert.equal(calls.length, 0);
+});
+
+test("parseLooseToolCalls converts narrative list_dir mention to tool call", () => {
+  const content = "I'll use list_dir to check /home/user/Desktop for the files.";
+  const calls = parseLooseToolCalls(content);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].function.name, "list_dir");
+  const args = JSON.parse(calls[0].function.arguments);
+  assert.equal(args.path, "/home/user/Desktop");
+});
+
+test("parseLooseToolCalls converts narrative read_file mention to tool call", () => {
+  const content = "Let me use read_file on /home/user/package.json to check the dependencies.";
+  const calls = parseLooseToolCalls(content);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].function.name, "read_file");
+  const args = JSON.parse(calls[0].function.arguments);
+  assert.equal(args.path, "/home/user/package.json");
+});
+
+test("parseLooseToolCalls handles shell block with command and fake output", () => {
+  const content = "```bash\ncat /etc/hostname\nmy-machine\n```";
+  const calls = parseLooseToolCalls(content);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].function.name, "run_command");
+  const args = JSON.parse(calls[0].function.arguments);
+  assert.equal(args.command, "cat /etc/hostname");
+});
+
+// ── looksLikeActionPreface: enhanced detection ──────────────────────────────
+
+test("looksLikeActionPreface detects tool name mentions", () => {
+  assert.equal(looksLikeActionPreface("I'll use list_dir to check the Desktop."), true);
+  assert.equal(looksLikeActionPreface("Let me call read_file on package.json."), true);
+  assert.equal(looksLikeActionPreface("I will use web_search to find the answer."), true);
+});
+
+test("looksLikeActionPreface detects bash code blocks", () => {
+  assert.equal(looksLikeActionPreface("```bash\nls -la\n```"), true);
+  assert.equal(looksLikeActionPreface("```shell\npwd\n```"), true);
+});
+
+test("looksLikeActionPreface detects use/call/run verbs", () => {
+  assert.equal(looksLikeActionPreface("Let me use the file listing tool."), true);
+  assert.equal(looksLikeActionPreface("I'll run a command to check."), true);
+  assert.equal(looksLikeActionPreface("I'm going to call the API."), true);
+});
+
+test("looksLikeActionPreface returns false for plain answers", () => {
+  assert.equal(looksLikeActionPreface("The answer is 42."), false);
+  assert.equal(looksLikeActionPreface("Here are your files."), false);
+});
+
+// ── runToolLoop: bash-block model response triggers tool execution ───────────
+
+test("runToolLoop converts bash-block response to tool execution", async () => {
+  const payload = { messages: [] };
+  const executed = [];
+  let callCount = 0;
+  const callLLM = async () => {
+    callCount += 1;
+    if (callCount === 1) {
+      return {
+        choices: [
+          {
+            message: {
+              content: "Let me check.\n\n```bash\nls /home/user/Desktop\n```",
+            },
+          },
+        ],
+      };
+    }
+    return { choices: [{ message: { content: "Found your files." } }] };
+  };
+  const executeTool = async (name, args) => {
+    executed.push({ name, args });
+    return { exitCode: 0, stdout: "file1.txt\nfile2.txt" };
+  };
+
+  const result = await runToolLoop({ payload, callLLM, executeTool, maxToolRounds: 3 });
+  assert.equal(executed.length, 1);
+  assert.equal(executed[0].name, "run_command");
+  assert.equal(executed[0].args.command, "ls /home/user/Desktop");
 });

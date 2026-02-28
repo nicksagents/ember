@@ -225,7 +225,7 @@ function tokenize(text) {
     .filter((token) => token.length > 2 && !STOPWORDS.has(token));
 }
 
-function parseLooseToolCalls(content) {
+export function parseLooseToolCalls(content) {
   if (typeof content !== "string") return [];
   const calls = [];
   let index = 0;
@@ -314,6 +314,51 @@ function parseLooseToolCalls(content) {
     }
     pushToolCall(name, args);
   }
+
+  // Fallback: detect markdown bash/shell code blocks → run_command
+  if (calls.length === 0) {
+    const bashBlockRegex = /```(?:bash|shell|sh)\s*\n([\s\S]*?)```/gi;
+    let bashMatch;
+    while ((bashMatch = bashBlockRegex.exec(content))) {
+      const block = (bashMatch[1] || "").trim();
+      if (!block) continue;
+      const firstLine = block.split("\n")[0].trim();
+      // Skip if it looks like fabricated output (ls output, permissions, etc.)
+      if (/^(?:total\s+\d|d?[r-][w-][x-]|lrwx|crw-|\d+\s)/.test(firstLine)) continue;
+      if (firstLine.length < 2) continue;
+      pushToolCall("run_command", { command: firstLine });
+      break; // Only convert the first bash block
+    }
+  }
+
+  // Fallback: detect narrative mentions of known tool names with extractable args
+  if (calls.length === 0) {
+    const KNOWN_FS_TOOLS = ["list_dir", "read_file", "stat_path"];
+    const lower = content.toLowerCase();
+    for (const toolName of KNOWN_FS_TOOLS) {
+      if (!lower.includes(toolName)) continue;
+      const pathMatch = content.match(/(?:\/[\w./-]+|~\/[\w./-]+|\.\/[\w./-]+)/);
+      if (pathMatch) {
+        pushToolCall(toolName, { path: pathMatch[0] });
+        break;
+      }
+    }
+    if (calls.length === 0 && lower.includes("run_command")) {
+      const cmdMatch = content.match(/`([^`]{3,})`/);
+      if (cmdMatch) {
+        pushToolCall("run_command", { command: cmdMatch[1].trim() });
+      }
+    }
+    if (calls.length === 0 && lower.includes("web_search")) {
+      const queryMatch = content.match(
+        /(?:search\s+(?:for\s+)?|query\s+)["']?([^"'\n]{5,})["']?/i
+      );
+      if (queryMatch) {
+        pushToolCall("web_search", { query: queryMatch[1].trim() });
+      }
+    }
+  }
+
   return calls;
 }
 
@@ -340,17 +385,27 @@ function formatToolFallback(name, result) {
   return "";
 }
 
-function looksLikeActionPreface(content) {
+export function looksLikeActionPreface(content) {
   const text = String(content || "").trim().toLowerCase();
   if (!text) return false;
-  return [
-    /\blet me\b.*\b(?:check|look|inspect|explore|review|read|open|search|scan|go through)\b/,
-    /\bi(?:'ll| will)\b.*\b(?:check|look|inspect|explore|review|read|open|search|scan|go through)\b/,
+  if ([
+    /\blet me\b.*\b(?:check|look|inspect|explore|review|read|open|search|scan|go through|use|call|run)\b/,
+    /\bi(?:'ll| will)\b.*\b(?:check|look|inspect|explore|review|read|open|search|scan|go through|use|call|run)\b/,
     /\bfirst[, ]+\bi(?:'ll| will)\b/,
-    /\bi(?:'m| am)\s+going\s+to\b.*\b(?:check|look|inspect|explore|review|read|open|search|scan)\b/,
+    /\bi(?:'m| am)\s+going\s+to\b.*\b(?:check|look|inspect|explore|review|read|open|search|scan|use|call|run)\b/,
     /\btake a look\b/,
     /\bchecking\b.*\b(?:file|files|folder|directory|project|repo|repository|codebase|structure)\b/,
-  ].some((pattern) => pattern.test(text));
+  ].some((pattern) => pattern.test(text))) return true;
+  // Detect mentions of actual tool names in narrative text
+  const TOOL_NAMES = [
+    "list_dir", "read_file", "write_file", "stat_path", "run_command",
+    "remove_path", "move_path", "copy_path", "web_search", "fetch_url",
+    "list_processes", "kill_process", "start_dev_server", "verify_server",
+  ];
+  if (TOOL_NAMES.some((name) => text.includes(name))) return true;
+  // Detect markdown bash blocks (model trying to act with wrong format)
+  if (/```(?:bash|shell|sh)\s*\n/.test(text)) return true;
+  return false;
 }
 
 function hashToken(token, dim) {

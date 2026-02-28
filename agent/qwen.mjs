@@ -72,15 +72,23 @@ export function buildQwenXmlToolSystemMessage(toolDefs) {
     lines.push("  </function>");
   }
   lines.push("</tools>");
-  lines.push(
-    "If you decide to call a tool, the tool call MUST be enclosed exactly like this:"
-  );
+  lines.push("");
+  lines.push("RULES:");
+  lines.push("- To call a tool, output ONLY:");
   lines.push("<tool_call>");
-  lines.push('{"name":"tool_name","arguments":{"arg":"value"}}');
+  const exampleTool = defs[0]?.function?.name || "tool_name";
+  const exampleParam = (() => {
+    const props = defs[0]?.function?.parameters?.properties;
+    if (!props) return '{"arg":"value"}';
+    const firstKey = Object.keys(props)[0];
+    return firstKey ? `{"${firstKey}":"..."}` : '{"arg":"value"}';
+  })();
+  lines.push(`{"name":"${exampleTool}","arguments":${exampleParam}}`);
   lines.push("</tool_call>");
-  lines.push("Do not wrap a tool call in markdown.");
-  lines.push("Do not emit any text after a tool call.");
-  lines.push("If no tool is needed, answer normally.");
+  lines.push("- NEVER use ```bash or ```shell code blocks.");
+  lines.push("- NEVER fabricate command output.");
+  lines.push("- NEVER describe what you will do. Just call the tool.");
+  lines.push("- Output NOTHING after <tool_call>...</tool_call>.");
   return lines.join("\n");
 }
 
@@ -108,8 +116,8 @@ export function buildQwenToolContinuationPrompt({
     lines.push(defaultPrompt);
   }
   lines.push(
-    "If you call another tool, use the exact <tool_call>{\"name\":\"...\",\"arguments\":{...}}</tool_call> format."
+    "Next step: call a tool using <tool_call>{\"name\":\"...\",\"arguments\":{...}}</tool_call> or give your final answer. " +
+    "Do NOT describe what you will do. Do NOT use ```bash blocks."
   );
-  lines.push("Do not emit any text after a tool call.");
   return lines.filter(Boolean).join("\n\n");
 }

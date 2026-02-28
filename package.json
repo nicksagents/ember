@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "ember": "node scripts/ember.mjs",
-    "test:agent": "node --test agent/core.test.mjs agent/orchestration.test.mjs agent/qwen.test.mjs agent/provider-compat.test.mjs"
+    "test:agent": "node --test agent/core.test.mjs agent/orchestration.test.mjs agent/qwen.test.mjs agent/provider-compat.test.mjs agent/filesystem-intent.test.mjs"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",

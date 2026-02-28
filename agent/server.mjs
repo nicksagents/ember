@@ -53,6 +53,12 @@ import {
   extractUnsupportedPayloadParams,
   stripUnsupportedPayloadParams,
 } from "./provider-compat.mjs";
+import {
+  looksLikeEditRequest,
+  looksLikeReferentialFilesystemFollowUp,
+  extractBareFileReference,
+  inferFilesystemTarget,
+} from "./filesystem-intent.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -2262,6 +2268,22 @@ function inferRecentProjectDirectory(history, config) {
   return "";
 }
 
+function inferRecentFilesystemTarget(history, config) {
+  const recent = Array.isArray(history) ? [...history].slice(-12).reverse() : [];
+  const recentProjectDir = inferRecentProjectDirectory(history, config);
+  for (const entry of recent) {
+    if (entry?.role !== "user") continue;
+    const target = inferFilesystemTarget(String(entry?.content || ""), {
+      homeDir: config.homeDir || os.homedir(),
+      desktopDir: config.desktopDir || path.join(config.homeDir || os.homedir(), "Desktop"),
+      workspaceRoot: config.workspaceRoot || (config.homeDir || os.homedir()),
+      fallbackDir: recentProjectDir || config.workspaceRoot || config.homeDir || os.homedir(),
+    });
+    if (target?.path) return target;
+  }
+  return null;
+}
+
 function inferServerStartCommand(userContent) {
   const text = String(userContent || "").toLowerCase();
   if (text.includes("pnpm")) return "pnpm dev";
@@ -2702,6 +2724,18 @@ async function handleChat(req, res) {
     const isWebLookup = Boolean(config.webSearchEnabled) && looksLikeWebLookupRequest(userContent);
     const processTask = classifyProcessTask(userContent);
     const localMachineTask = classifyLocalMachineInfoTask(userContent);
+    const explicitProjectDir = inferProjectDirectory(userContent, config);
+    const recentProjectDir = inferRecentProjectDirectory(history, config);
+    const recentFilesystemTarget = inferRecentFilesystemTarget(history, config);
+    const currentFilesystemTarget = inferFilesystemTarget(userContent, {
+      homeDir: config.homeDir || os.homedir(),
+      desktopDir: config.desktopDir || path.join(config.homeDir || os.homedir(), "Desktop"),
+      workspaceRoot: config.workspaceRoot || (config.homeDir || os.homedir()),
+      fallbackDir: explicitProjectDir || recentProjectDir || config.workspaceRoot || config.homeDir || os.homedir(),
+    });
+    const referentialFilesystemFollowUp =
+      looksLikeReferentialFilesystemFollowUp(userContent) &&
+      Boolean(recentFilesystemTarget?.path);
 
     const requiresTool = (() => {
       const text = userContent.toLowerCase();
@@ -2717,6 +2751,10 @@ async function handleChat(req, res) {
       if (/\b(?:inspect|explore|scan|review|look\s+through|go\s+through)\b/.test(text) && /\b(?:file|files|folder|directory|project|repo|repository|codebase|source|structure)\b/.test(text)) return true;
       if (/\b(?:see|understand|inspect|explore)\s+(?:how\s+(?:you|it)\s+work|yourself|your\s+own\s+(?:files|code|project|repo|repository|structure))\b/.test(text)) return true;
       if (/\bfile\s+structure\b/.test(text)) return true;
+      if (/\b(?:desktop|home)\b/.test(text) && /\b(?:go to|open|list|show|read|what'?s?\s+in)\b/.test(text)) return true;
+      if (looksLikeEditRequest(userContent) && Boolean(extractBareFileReference(userContent))) return true;
+      if (referentialFilesystemFollowUp) return true;
+      if (currentFilesystemTarget?.path && /\b(?:open|read|show|list|view|edit|change|modify|update|replace)\b/.test(text)) return true;
       if (localMachineTask) return true;
       if (processTask) return true;
       if (/\b(?:create|build|scaffold|set\s*up|initialize|init)\s+(?:a\s+)?(?:new\s+)?(?:project|app|application|website|site|repo|repository)\b/.test(text)) return true;
@@ -2765,10 +2803,9 @@ async function handleChat(req, res) {
       const home = config.homeDir || os.homedir();
       const desktop = config.desktopDir || path.join(home, "Desktop");
       const phase = options?.phase || "execute";
-      const explicitProjectDir = inferProjectDirectory(userContent, config);
-      const recentProjectDir = inferRecentProjectDirectory(history, config);
 
       const wantsDesktop = text.includes("desktop");
+      const wantsHome = /\bhome\b/.test(text);
       const wantsWorkspace =
         /\b(?:project|repo|repository|codebase|source|structure|how you work|yourself|your own)\b/.test(
           text
@@ -2804,6 +2841,7 @@ async function handleChat(req, res) {
         text.includes("create folder") ||
         text.includes("create directory") ||
         text.includes("make directory");
+      const editLike = looksLikeEditRequest(userContent);
       const deleteLike =
         text.includes("delete") || text.includes("remove") || text.includes("rm ");
       const moveLike =
@@ -2812,6 +2850,8 @@ async function handleChat(req, res) {
       const repoStatusLike =
         /\b(?:show|check|review)\s+(?:me\s+)?(?:the\s+)?(?:latest|recent|current)\s+(?:changes|status)\b/.test(text) ||
         /\bgit\s+(?:status|diff|log)\b/.test(text);
+      const referentialTarget =
+        looksLikeReferentialFilesystemFollowUp(userContent) ? recentFilesystemTarget : null;
 
       if (localMachineTask) {
         const loopState = inspectToolLoopMessages(_payload?.messages || []);
@@ -3007,6 +3047,20 @@ async function handleChat(req, res) {
         };
       }
 
+      if (listLike && wantsHome) {
+        return {
+          name: "list_dir",
+          arguments: { path: home },
+        };
+      }
+
+      if (listLike && referentialTarget?.path && referentialTarget.kind !== "file") {
+        return {
+          name: "list_dir",
+          arguments: { path: referentialTarget.path },
+        };
+      }
+
       if (listLike && wantsWorkspace) {
         const workspaceRoot = config.workspaceRoot || process.cwd();
         const loopState = inspectToolLoopMessages(_payload?.messages || []);
@@ -3027,11 +3081,32 @@ async function handleChat(req, res) {
       }
 
       if (readLike) {
-        const fileMatch = userContent.match(/(?:read|open)\s+([\w./-]+)\b/i);
-        if (fileMatch) {
-          const target = fileMatch[1];
-          const fullPath = path.isAbsolute(target) ? target : path.join(home, target);
-          return { name: "read_file", arguments: { path: fullPath } };
+        const target =
+          currentFilesystemTarget?.path ||
+          referentialTarget?.path ||
+          (extractBareFileReference(userContent)
+            ? path.join(
+                explicitProjectDir || recentProjectDir || config.workspaceRoot || home,
+                extractBareFileReference(userContent)
+              )
+            : "");
+        if (target) {
+          return { name: "read_file", arguments: { path: target } };
+        }
+      }
+
+      if (editLike) {
+        const target =
+          currentFilesystemTarget?.path ||
+          referentialTarget?.path ||
+          (extractBareFileReference(userContent)
+            ? path.join(
+                explicitProjectDir || recentProjectDir || config.workspaceRoot || home,
+                extractBareFileReference(userContent)
+              )
+            : "");
+        if (target) {
+          return { name: "read_file", arguments: { path: target } };
         }
       }
 
@@ -3081,6 +3156,11 @@ async function handleChat(req, res) {
     };
     if (config.max_tokens) {
       payload.max_tokens = config.max_tokens;
+    }
+    // For Qwen models during tool-requiring tasks, cap response length to
+    // prevent long narratives and force concise tool-call output
+    if (isQwenCoder && requiresTool) {
+      payload.max_tokens = Math.min(payload.max_tokens || 2048, 768);
     }
     if (typeof config.min_p === "number" && config.min_p > 0) {
       payload.min_p = config.min_p;
@@ -3283,16 +3363,14 @@ async function handleChat(req, res) {
     }
     if (requiresTool && isQwenCoderModel(activeModel)) {
       systemNotes.push(
-        "Qwen tool-use rule: do not stop after announcing a plan or first step. " +
-        "Continue the tool loop until the task is complete and verified. " +
-        "If you say you will inspect or check something, immediately continue with the next tool call."
-      );
-      systemNotes.push(
-        "When calling a tool, use the exact <tool_call>{\"name\":\"tool_name\",\"arguments\":{...}}</tool_call> format with no markdown and no trailing text."
+        "CRITICAL: Call tools using <tool_call>{\"name\":\"...\",\"arguments\":{...}}</tool_call>. " +
+        "NEVER use ```bash blocks. NEVER fabricate command output. " +
+        "NEVER stop after saying what you will do -- call the tool NOW. " +
+        "Continue the tool loop until the task is complete and verified."
       );
       if (usePromptOnlyTools) {
         systemNotes.push(
-          "You are running behind llama.cpp. Prefer prompt-directed XML tool calls instead of relying on native OpenAI tool fields."
+          "You run on llama.cpp. Use XML <tool_call> format only."
         );
       }
     }

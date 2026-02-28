@@ -37,8 +37,11 @@ test("buildQwenXmlToolSystemMessage renders exact tool call guidance", () => {
   assert.ok(message.includes("<function>"));
   assert.ok(message.includes("<name>run_command</name>"));
   assert.ok(message.includes("<tool_call>"));
-  assert.ok(message.includes('{"name":"tool_name","arguments":{"arg":"value"}}'));
-  assert.ok(message.includes("Do not emit any text after a tool call."));
+  // Uses real tool name from the first definition as the example
+  assert.ok(message.includes('{"name":"run_command","arguments":{"command":"..."}'));
+  assert.ok(message.includes("NEVER use ```bash"));
+  assert.ok(message.includes("NEVER fabricate command output"));
+  assert.ok(message.includes("NEVER describe what you will do"));
 });
 
 test("buildQwenToolContinuationPrompt includes tool results and exact format reminder", () => {
@@ -61,6 +64,7 @@ test("buildQwenToolContinuationPrompt includes tool results and exact format rem
   assert.ok(prompt.includes("[Tool result: run_command]"));
   assert.ok(prompt.includes("192.168.1.10"));
   assert.ok(prompt.includes("<tool_call>{\"name\":\"...\",\"arguments\":{...}}</tool_call>"));
+  assert.ok(prompt.includes("Do NOT use ```bash blocks"));
 });
 
 test("ToolRegistry.selectDefinitions narrows tool set to relevant tools", () => {
