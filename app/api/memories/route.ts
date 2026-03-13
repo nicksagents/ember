@@ -41,6 +41,10 @@ export async function PATCH(req: NextRequest) {
   }
 }
 
+export async function PUT(req: NextRequest) {
+  return PATCH(req);
+}
+
 export async function POST(req: NextRequest) {
   try {
     const payload = await req.json();

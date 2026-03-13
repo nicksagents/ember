@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Brain, ChevronLeft, Menu, Settings } from "lucide-react";
+import { Brain, Bug, ChevronLeft, Menu, Settings } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -65,6 +65,16 @@ export function Header({
       </div>
       {!showBack ? (
         <div className="flex items-center gap-2">
+          <Button
+            asChild
+            variant="ghost"
+            size="icon"
+            className="h-9 w-9 rounded-full border border-white/10 bg-white/[0.02] text-zinc-300 hover:bg-white/[0.06] hover:text-white"
+          >
+            <Link href="/debug" aria-label="Debug">
+              <Bug className="h-4 w-4" />
+            </Link>
+          </Button>
           <Button
             asChild
             variant="ghost"

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  sanitizeConfigInput,
   validateChatRequest,
   buildSystemPrompt,
   buildContextMessages,
@@ -10,12 +11,88 @@ import {
   selectRelevantMemories,
   detectMemoryCandidates,
   detectMemoryInvalidations,
+  detectDiscoveryFacts,
   buildEmbedding,
   consolidateMemories,
   computeMemoryDomain,
   bucketMemories,
   selectMemoriesWithFallback,
+  inferRelevantMemoryLimit,
+  explainMemoryScore,
 } from "./core.mjs";
+
+test("sanitizeConfigInput preserves auto max tokens and larger runtime budgets", () => {
+  const result = sanitizeConfigInput({
+    max_tokens: 0,
+    contextWindow: 32768,
+    maxToolRounds: 48,
+    maxMemoryItems: 18,
+    maxMemoryChars: 3500,
+  });
+
+  assert.equal(result.max_tokens, 0);
+  assert.equal(result.contextWindow, 32768);
+  assert.equal(result.maxToolRounds, 48);
+  assert.equal(result.maxMemoryItems, 18);
+  assert.equal(result.maxMemoryChars, 3500);
+});
+
+test("sanitizeConfigInput clamps oversized runtime budgets safely", () => {
+  const result = sanitizeConfigInput({
+    max_tokens: 999999,
+    contextWindow: 999999,
+    maxToolRounds: 999,
+    contextCharBudget: 999999,
+    maxMemoryItems: 999,
+    maxMemoryChars: 999999,
+  });
+
+  assert.equal(result.max_tokens, 65536);
+  assert.equal(result.contextWindow, 131072);
+  assert.equal(result.maxToolRounds, 240);
+  assert.equal(result.contextCharBudget, 96000);
+  assert.equal(result.maxMemoryItems, 30);
+  assert.equal(result.maxMemoryChars, 8000);
+});
+
+test("sanitizeConfigInput keeps provider registry and role assignments", () => {
+  const result = sanitizeConfigInput({
+    providers: [
+      {
+        id: "openai-codex",
+        name: "OpenAI Codex",
+        type: "openai-codex",
+        endpoint: "https://chatgpt.com/backend-api/codex/responses",
+        authType: "codex-oauth",
+        apiKey: "",
+        apiKeyEnvVar: "",
+        models: ["gpt-5.2-codex"],
+        defaultModel: "gpt-5.2-codex",
+        maxContextWindow: 400000,
+        supportsTools: true,
+        supportsStreaming: true,
+        supportsBrowser: true,
+        enabled: true,
+        oauthIdToken: "id-token",
+        samplingDefaults: {
+          temperature: 0.2,
+          top_p: 0.9,
+          max_tokens: 4096,
+        },
+      },
+    ],
+    roleAssignments: {
+      coder: { providerId: "openai-codex", model: "gpt-5.2-codex" },
+      router: { providerId: "local-qwen", model: "Qwen3" },
+    },
+  });
+
+  assert.equal(result.providers[0].id, "openai-codex");
+  assert.equal(result.providers[0].authType, "codex-oauth");
+  assert.equal(result.providers[0].oauthIdToken, "id-token");
+  assert.equal(result.roleAssignments.coder.providerId, "openai-codex");
+  assert.equal(result.roleAssignments.router.model, "Qwen3");
+});
 
 test("validateChatRequest rejects missing fields", () => {
   const result = validateChatRequest({});
@@ -43,6 +120,9 @@ test("buildSystemPrompt includes sections and caps memories", () => {
   assert.ok(prompt.includes("[Memories]"));
   assert.ok(prompt.includes("[Workflow]"));
   assert.ok(prompt.includes("1. Understand the task"));
+  assert.ok(prompt.includes("4. Preserve durable context"));
+  assert.ok(prompt.includes("[general] Memory B"));
+  assert.ok(prompt.includes("[general] Memory C"));
   assert.ok(prompt.includes("Memory B"));
   assert.ok(prompt.includes("Memory C"));
   assert.ok(!prompt.includes("Memory A"));
@@ -110,6 +190,147 @@ test("detectMemoryInvalidations flags negated preferences", () => {
   ];
   const result = detectMemoryInvalidations("I don't like sushi.", memories);
   assert.ok(result.includes("1"));
+});
+
+test("parseLooseToolCalls parses JSON parameter values in function blocks", () => {
+  const input =
+    '<function=write_file><parameter=path>/tmp/test.json</parameter><parameter=content>{"key":"value","nested":true}</parameter></function>';
+  const calls = parseLooseToolCalls(input);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(
+    JSON.parse(calls[0].function.arguments),
+    {
+      path: "/tmp/test.json",
+      content: { key: "value", nested: true },
+    }
+  );
+});
+
+test("parseLooseToolCalls joins multiline bash blocks", () => {
+  const input = "```bash\ncd /project\nnpm install\nnpm run build\n```";
+  const calls = parseLooseToolCalls(input);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(JSON.parse(calls[0].function.arguments), {
+    command: "cd /project && npm install && npm run build",
+  });
+});
+
+test("selectRelevantMemories keeps short technical terms", () => {
+  const memories = [
+    { content: "User's IP is 192.168.1.5 and OS is Ubuntu.", type: "reference", ts: "2026-01-01T00:00:00Z" },
+    { content: "User likes sushi.", type: "preference", ts: "2026-01-01T00:00:00Z" },
+  ];
+  const result = selectRelevantMemories(memories, "what is my ip and os", 2, {
+    maxAgeDays: 365,
+    referenceMaxAgeDays: 365,
+  });
+  assert.ok(result.some((m) => m.content.includes("IP is 192.168.1.5")));
+});
+
+test("selectRelevantMemories prefers whole-word token matches", () => {
+  const memories = [
+    {
+      content: "Project uses a test runner and test suite.",
+      type: "project",
+      ts: "2026-02-01T00:00:00Z",
+    },
+    {
+      content: "The user joined a protest downtown.",
+      type: "reference",
+      ts: "2026-02-01T00:00:00Z",
+    },
+  ];
+  const result = selectRelevantMemories(memories, "test", 1, {
+    minScore: 0,
+    referenceMaxAgeDays: 365,
+    maxAgeDays: 365,
+  });
+  assert.equal(result[0]?.content, "Project uses a test runner and test suite.");
+});
+
+test("explainMemoryScore returns a readable breakdown", () => {
+  const result = explainMemoryScore(
+    {
+      content: "Project uses React and TypeScript.",
+      type: "project",
+      tags: ["project", "frontend"],
+      ts: "2026-02-01T00:00:00Z",
+      useCount: 3,
+    },
+    "react typescript project"
+  );
+  assert.ok(result.score > 0);
+  assert.ok(result.breakdown.tokenMatches.includes("react"));
+  assert.ok(result.breakdown.typeBoost > 0);
+});
+
+test("selectRelevantMemories can surface strong unapproved memories", () => {
+  const memories = [
+    {
+      content: "Web result for \"latest react version\": React 19.2 is the current stable release.",
+      type: "reference",
+      approved: false,
+      confirmed: false,
+      ts: "2026-02-01T00:00:00Z",
+    },
+  ];
+  const result = selectRelevantMemories(memories, "what is the latest react version", 3, {
+    minScore: 0,
+    referenceMaxAgeDays: 365,
+    maxAgeDays: 365,
+  });
+  assert.equal(result.length, 1);
+});
+
+test("inferRelevantMemoryLimit expands when many strong matches exist", () => {
+  const memories = Array.from({ length: 8 }, (_, index) => ({
+    content: `Project fact ${index}: agent memory engine uses web search and memory retrieval keywords`,
+    type: "project",
+    ts: "2026-02-01T00:00:00Z",
+  }));
+  const limit = inferRelevantMemoryLimit(
+    memories,
+    "agent memory engine web search memory retrieval keywords",
+    5,
+    10,
+    { minScore: 0 }
+  );
+  assert.ok(limit > 5);
+});
+
+test("detectDiscoveryFacts extracts memories from web_search results", () => {
+  const facts = detectDiscoveryFacts(
+    "web_search",
+    {
+      query: "latest react version",
+      results: [
+        {
+          title: "React 19.2 released",
+          url: "https://react.dev/blog/react-19-2",
+          snippet: "React 19.2 is now the latest stable release with new improvements.",
+        },
+      ],
+    },
+    [],
+    5
+  );
+  assert.ok(facts.some((fact) => fact.content.includes('Web result for "latest react version"')));
+  assert.ok(facts.some((fact) => fact.tags.includes("web")));
+});
+
+test("detectDiscoveryFacts extracts memories from fetch_url results", () => {
+  const facts = detectDiscoveryFacts(
+    "fetch_url",
+    {
+      url: "https://example.com/story",
+      title: "Example Story",
+      excerpt: "A concise summary of the important facts from the page.",
+    },
+    [],
+    5
+  );
+  assert.ok(facts.some((fact) => fact.content.includes('From "Example Story"')));
+  assert.ok(facts.some((fact) => fact.tags.includes("web")));
 });
 
 test("buildEmbedding produces fixed size vector", () => {
@@ -851,6 +1072,71 @@ test("parseLooseToolCalls converts narrative read_file mention to tool call", ()
   assert.equal(args.path, "/home/user/package.json");
 });
 
+test("parseLooseToolCalls converts file-labeled code fence to write_file", () => {
+  const content = [
+    "I'll update the file now.",
+    "",
+    "```tsx",
+    "// src/app/page.tsx",
+    "export default function Page() {",
+    "  return <main>Updated</main>;",
+    "}",
+    "```",
+  ].join("\n");
+  const calls = parseLooseToolCalls(content);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].function.name, "write_file");
+  const args = JSON.parse(calls[0].function.arguments);
+  assert.equal(args.path, "src/app/page.tsx");
+  assert.equal(args.createDirs, true);
+  assert.equal(
+    args.content,
+    'export default function Page() {\n  return <main>Updated</main>;\n}'
+  );
+});
+
+test("parseLooseToolCalls extracts write_file from unlabeled code fence when editTargetPath is set", () => {
+  const content = [
+    "Let me update the page.tsx file now.",
+    "",
+    "```tsx",
+    "export default function Page() {",
+    "  return <main>Hello World</main>;",
+    "}",
+    "```",
+  ].join("\n");
+  // Without editTargetPath, no code-fence-to-write_file match (no file label/comment)
+  const callsWithout = parseLooseToolCalls(content);
+  assert.equal(callsWithout.length, 0);
+  // With editTargetPath, the code fence is extracted as a write_file call
+  const callsWith = parseLooseToolCalls(content, { editTargetPath: "/home/user/project/app/page.tsx" });
+  assert.equal(callsWith.length, 1);
+  assert.equal(callsWith[0].function.name, "write_file");
+  const args = JSON.parse(callsWith[0].function.arguments);
+  assert.equal(args.path, "/home/user/project/app/page.tsx");
+  assert.ok(args.content.includes("Hello World"));
+});
+
+test("parseLooseToolCalls recovers truncated XML write_file calls", () => {
+  const content = [
+    "<tool_call>",
+    "<function=write_file>",
+    "<parameter=path>/home/user/app/page.tsx</parameter>",
+    "<parameter=content>",
+    'import React from "react";',
+    "export default function Page() {",
+    "  return <div>Dashboard</div>;",
+    // No closing tags — truncated by max_tokens
+  ].join("\n");
+  const calls = parseLooseToolCalls(content);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].function.name, "write_file");
+  const args = JSON.parse(calls[0].function.arguments);
+  assert.equal(args.path, "/home/user/app/page.tsx");
+  assert.ok(args.content.includes("Dashboard"));
+  assert.equal(args.createDirs, true);
+});
+
 test("parseLooseToolCalls handles shell block with command and fake output", () => {
   const content = "```bash\ncat /etc/hostname\nmy-machine\n```";
   const calls = parseLooseToolCalls(content);
@@ -877,6 +1163,14 @@ test("looksLikeActionPreface detects use/call/run verbs", () => {
   assert.equal(looksLikeActionPreface("Let me use the file listing tool."), true);
   assert.equal(looksLikeActionPreface("I'll run a command to check."), true);
   assert.equal(looksLikeActionPreface("I'm going to call the API."), true);
+});
+
+test("looksLikeActionPreface detects create/write/build narration", () => {
+  assert.equal(looksLikeActionPreface("Now I'll create a new bank dashboard page.tsx file."), true);
+  assert.equal(looksLikeActionPreface("I'll write the updated component now."), true);
+  assert.equal(looksLikeActionPreface("Let me build the dashboard layout."), true);
+  assert.equal(looksLikeActionPreface("I'm going to update the page with the new code."), true);
+  assert.equal(looksLikeActionPreface("I will save the changes to the file."), true);
 });
 
 test("looksLikeActionPreface returns false for plain answers", () => {

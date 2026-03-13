@@ -55,6 +55,7 @@ function createProcessState(label, logPath) {
     exitCode: null,
     exitSignal: null,
     startupComplete: false,
+    reusedExisting: false,
   };
 }
 
@@ -186,6 +187,22 @@ async function waitForHealth(url, timeoutMs) {
   return false;
 }
 
+function outputLooksLikePortCollision(state) {
+  const text = stripAnsi(String(state?.recentOutput || "")).toLowerCase();
+  return text.includes("eaddrinuse") || text.includes("address already in use");
+}
+
+async function tryReuseExistingService(state, healthUrl, timeoutMs = 2500) {
+  if (!outputLooksLikePortCollision(state)) return false;
+  const healthy = await waitForHealth(healthUrl, timeoutMs);
+  if (!healthy) return false;
+  state.startupComplete = true;
+  state.reusedExisting = true;
+  state.exitCode = null;
+  state.exitSignal = null;
+  return true;
+}
+
 function wireLogs(proc, filePath, state) {
   const stream = fs.createWriteStream(filePath, { flags: "a" });
   proc.stdout?.on("data", (chunk) => {
@@ -312,81 +329,103 @@ async function main() {
   const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
   const agentState = createProcessState("Agent runtime", agentLogPath);
   const uiState = createProcessState("Web UI", uiLogPath);
+  const agentHealthUrl = `http://127.0.0.1:${AGENT_PORT}/health`;
+  const uiHealthUrl = `http://127.0.0.1:${UI_PORT}`;
 
-  writeAt(ROW.message, "  Starting agent runtime...");
-  agentProcess = spawn("node", ["agent/server.mjs"], {
-    cwd: projectRoot,
-    detached: true,
-    stdio: ["ignore", "pipe", "pipe"],
-    env: {
-      ...process.env,
-      AGENT_HOST: agentHost,
-      AGENT_PORT: String(AGENT_PORT),
-    },
-  });
-  wireLogs(agentProcess, agentLogPath, agentState);
-  agentProcess.on("error", (error) => {
-    agentState.lastError = error;
-    if (shuttingDown) return;
-    paintUiStatus("NOT READY");
-    shutdown("agent_error", { message: formatProcessFailure(agentState) });
-  });
-  agentProcess.on("exit", (code, signal) => {
-    agentState.exitCode = code;
-    agentState.exitSignal = signal;
-    if (shuttingDown) return;
-    paintUiStatus("NOT READY");
-    shutdown(
-      agentState.startupComplete ? "agent_exit" : "agent_startup_exit",
-      {
-        message: formatProcessFailure(
-          agentState,
-          agentState.startupComplete ? "runtime" : "startup"
-        ),
+  const existingAgentReady = await waitForHealth(agentHealthUrl, 500);
+  if (existingAgentReady) {
+    agentState.startupComplete = true;
+    agentState.reusedExisting = true;
+    writeAt(ROW.message, "  Reusing existing agent runtime...");
+  } else {
+    writeAt(ROW.message, "  Starting agent runtime...");
+    agentProcess = spawn("node", ["agent/server.mjs"], {
+      cwd: projectRoot,
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        AGENT_HOST: agentHost,
+        AGENT_PORT: String(AGENT_PORT),
+      },
+    });
+    wireLogs(agentProcess, agentLogPath, agentState);
+    agentProcess.on("error", (error) => {
+      agentState.lastError = error;
+      if (shuttingDown) return;
+      paintUiStatus("NOT READY");
+      shutdown("agent_error", { message: formatProcessFailure(agentState) });
+    });
+    agentProcess.on("exit", async (code, signal) => {
+      agentState.exitCode = code;
+      agentState.exitSignal = signal;
+      if (shuttingDown) return;
+      if (!agentState.startupComplete && await tryReuseExistingService(agentState, agentHealthUrl)) {
+        return;
       }
-    );
-  });
-
-  writeAt(ROW.message, "  Starting web UI...");
-  uiProcess = spawn(
-    npmCmd,
-    ["run", "dev", "--", "--webpack", "-p", String(UI_PORT), "-H", uiHost],
-    {
-    cwd: projectRoot,
-    detached: true,
-    stdio: ["ignore", "pipe", "pipe"],
-    env: {
-      ...process.env,
-      PORT: String(UI_PORT),
-      HOSTNAME: uiHost,
-      EMBER_AGENT_URL: `http://127.0.0.1:${AGENT_PORT}`,
-    },
+      paintUiStatus("NOT READY");
+      shutdown(
+        agentState.startupComplete ? "agent_exit" : "agent_startup_exit",
+        {
+          message: formatProcessFailure(
+            agentState,
+            agentState.startupComplete ? "runtime" : "startup"
+          ),
+        }
+      );
+    });
   }
-  );
-  wireLogs(uiProcess, uiLogPath, uiState);
-  uiProcess.on("error", (error) => {
-    uiState.lastError = error;
-    if (shuttingDown) return;
-    paintUiStatus("NOT READY");
-    shutdown("ui_error", { message: formatProcessFailure(uiState) });
-  });
-  uiProcess.on("exit", (code, signal) => {
-    uiState.exitCode = code;
-    uiState.exitSignal = signal;
-    if (shuttingDown) return;
-    paintUiStatus("NOT READY");
-    shutdown(
-      uiState.startupComplete ? "ui_exit" : "ui_startup_exit",
+
+  const existingUiReady = await waitForHealth(uiHealthUrl, 500);
+  if (existingUiReady) {
+    uiState.startupComplete = true;
+    uiState.reusedExisting = true;
+    writeAt(ROW.message, "  Reusing existing web UI...");
+  } else {
+    writeAt(ROW.message, "  Starting web UI...");
+    uiProcess = spawn(
+      npmCmd,
+      ["run", "dev", "--", "--webpack", "-p", String(UI_PORT), "-H", uiHost],
       {
-        message: formatProcessFailure(
-          uiState,
-          uiState.startupComplete ? "runtime" : "startup"
-        ),
+        cwd: projectRoot,
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: {
+          ...process.env,
+          PORT: String(UI_PORT),
+          HOSTNAME: uiHost,
+          EMBER_AGENT_URL: `http://127.0.0.1:${AGENT_PORT}`,
+        },
       }
     );
-  });
+    wireLogs(uiProcess, uiLogPath, uiState);
+    uiProcess.on("error", (error) => {
+      uiState.lastError = error;
+      if (shuttingDown) return;
+      paintUiStatus("NOT READY");
+      shutdown("ui_error", { message: formatProcessFailure(uiState) });
+    });
+    uiProcess.on("exit", async (code, signal) => {
+      uiState.exitCode = code;
+      uiState.exitSignal = signal;
+      if (shuttingDown) return;
+      if (!uiState.startupComplete && await tryReuseExistingService(uiState, uiHealthUrl)) {
+        return;
+      }
+      paintUiStatus("NOT READY");
+      shutdown(
+        uiState.startupComplete ? "ui_exit" : "ui_startup_exit",
+        {
+          message: formatProcessFailure(
+            uiState,
+            uiState.startupComplete ? "runtime" : "startup"
+          ),
+        }
+      );
+    });
+  }
 
-  const agentReady = await waitForHealth(`http://127.0.0.1:${AGENT_PORT}/health`, 25000);
+  const agentReady = agentState.startupComplete || await waitForHealth(agentHealthUrl, 25000);
   if (!agentReady) {
     if (shuttingDown) return;
     paintUiStatus("NOT READY");
@@ -396,7 +435,7 @@ async function main() {
   }
   agentState.startupComplete = true;
 
-  const uiReady = await waitForHealth(`http://127.0.0.1:${UI_PORT}`, 45000);
+  const uiReady = uiState.startupComplete || await waitForHealth(uiHealthUrl, 45000);
   if (shuttingDown) return;
   uiState.startupComplete = uiReady;
   uiStatus = uiReady ? "READY" : "NOT READY";

@@ -61,8 +61,52 @@ test("buildExecutionPlan creates local machine inspection steps", () => {
   assert.equal(plan.steps.length >= 2, true);
   assert.ok(plan.steps.some((step) => step.includes("local IP")));
   assert.ok(plan.steps.some((step) => step.includes("Tailscale")));
+  assert.ok(plan.steps.some((step) => step.includes("(run_command)")));
   const note = formatExecutionPlanNote(plan);
   assert.ok(note.includes("[Execution plan]"));
   assert.ok(note.includes("[Tool guide]"));
   assert.ok(note.includes("keep going until the request is complete"));
+});
+
+test("buildExecutionPlan includes a memory save step when memory candidates exist", () => {
+  const plan = buildExecutionPlan({
+    userContent: "my favorite editor is neovim",
+    memoryItems: [
+      {
+        content: "User prefers Neovim.",
+        type: "preference",
+        tags: ["preference"],
+      },
+    ],
+  });
+
+  assert.ok(
+    plan.steps.some((step) =>
+      step.includes("Save the durable memory candidates with save_memory")
+    )
+  );
+});
+
+test("buildExecutionPlan avoids read_file for simple directory listing requests", () => {
+  const plan = buildExecutionPlan({
+    userContent:
+      "list off the items in my Desktop and confirm there's a folder called bank",
+    isReadOnlyFsRequest: true,
+  });
+
+  assert.ok(plan.steps.some((step) => step.includes("(list_dir)")));
+  assert.ok(plan.steps.some((step) => step.includes("(stat_path)")));
+  assert.ok(!plan.steps.some((step) => step.includes("(read_file)")));
+});
+
+test("buildExecutionPlan includes write_file for targeted edit requests", () => {
+  const plan = buildExecutionPlan({
+    userContent:
+      "inside the bank folder edit page.tsx to resemble a modern sleek bank dashboard",
+    recentProjectDir: "/home/agent_t560/Desktop/bank",
+  });
+
+  assert.ok(plan.steps.some((step) => step.includes("(list_dir)")));
+  assert.ok(plan.steps.some((step) => step.includes("(read_file)")));
+  assert.ok(plan.steps.some((step) => step.includes("(write_file)")));
 });

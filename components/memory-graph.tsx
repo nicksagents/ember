@@ -14,7 +14,15 @@ type MemoryNode = {
   lastUsed: string | null;
 };
 
-type MemoryLink = { source: string; target: string; weight: number };
+type MemoryLink = {
+  source: string;
+  target: string;
+  weight: number;
+  lexical?: number;
+  semantic?: number;
+  kind?: string;
+  pulseSpeed?: number;
+};
 
 type MemoryGraphData = {
   nodes: MemoryNode[];
@@ -31,7 +39,15 @@ type RenderNode = MemoryNode & {
   depthScale: number;
 };
 
-type RenderLink = { a: number; b: number; weight: number };
+type RenderLink = {
+  a: number;
+  b: number;
+  weight: number;
+  lexical: number;
+  semantic: number;
+  kind: string;
+  pulseSpeed: number;
+};
 
 const COLOR_BY_TYPE: Record<string, [number, number, number]> = {
   identity: [248, 250, 252],
@@ -79,7 +95,7 @@ export function MemoryGraph({
     dragY: number;
     dragging: boolean;
     hoverIndex: number;
-    pulses: Array<{ linkIndex: number; t: number; speed: number }>;
+    pulses: Array<{ linkIndex: number; t: number; speed: number; radius: number }>;
   }>({
     nodes: [],
     links: [],
@@ -133,20 +149,33 @@ export function MemoryGraph({
         const a = indexById.get(link.source);
         const b = indexById.get(link.target);
         if (a == null || b == null) return null;
-        return { a, b, weight: link.weight };
+        return {
+          a,
+          b,
+          weight: link.weight,
+          lexical: link.lexical ?? 0,
+          semantic: link.semantic ?? 0,
+          kind: link.kind || "related",
+          pulseSpeed: link.pulseSpeed ?? 0.0045,
+        };
       })
       .filter(Boolean) as RenderLink[];
 
     stateRef.current.nodes = nodes;
     stateRef.current.links = links;
     stateRef.current.hoverIndex = -1;
-    stateRef.current.pulses = Array.from({
-      length: Math.min(80, Math.max(16, links.length * 2)),
-    }).map(() => ({
-      linkIndex: Math.floor(Math.random() * Math.max(links.length, 1)),
-      t: Math.random(),
-      speed: 0.003 + Math.random() * 0.005,
-    }));
+    stateRef.current.pulses = links.flatMap((link, linkIndex) => {
+      const copies =
+        link.kind === "duplicate" ? 4 : link.kind === "strong" ? 3 : 1;
+      return Array.from({ length: copies }).map((_, pulseIndex) => ({
+        linkIndex,
+        t: (pulseIndex + Math.random()) / copies,
+        speed: (link.pulseSpeed || 0.0045) * (0.9 + Math.random() * 0.28),
+        radius:
+          (link.kind === "duplicate" ? 1.8 : link.kind === "strong" ? 1.45 : 1.1) +
+          (link.weight || 0.5) * 1.25,
+      }));
+    }).slice(0, 180);
 
     const projectNode = (node: RenderNode) => {
       const { width, height } = bounds();
@@ -169,7 +198,7 @@ export function MemoryGraph({
       node.screenY = height * 0.52 + y2 * perspective + state.dragY;
     };
 
-    const updateHover = (clientX: number, clientY: number) => {
+    const hitTest = (clientX: number, clientY: number, extraRadius = 0) => {
       const rect = canvas.getBoundingClientRect();
       const x = clientX - rect.left;
       const y = clientY - rect.top;
@@ -177,16 +206,21 @@ export function MemoryGraph({
       let minDistance = Infinity;
       for (let i = 0; i < stateRef.current.nodes.length; i += 1) {
         const node = stateRef.current.nodes[i];
-        const radius = node.radius * node.depthScale + 6;
+        const radius = node.radius * node.depthScale + 6 + extraRadius;
         const distance = Math.hypot(x - node.screenX, y - node.screenY);
         if (distance <= radius && distance < minDistance) {
           hoverIndex = i;
           minDistance = distance;
         }
       }
-      stateRef.current.hoverIndex = hoverIndex;
+      return hoverIndex;
     };
 
+    const updateHover = (clientX: number, clientY: number) => {
+      stateRef.current.hoverIndex = hitTest(clientX, clientY);
+    };
+
+    // ── Mouse events ──────────────────────────────────────────────────
     const onMouseMove = (event: MouseEvent) => {
       updateHover(event.clientX, event.clientY);
       if (!stateRef.current.dragging) return;
@@ -215,11 +249,71 @@ export function MemoryGraph({
       onSelect(hovered >= 0 ? stateRef.current.nodes[hovered] : null);
     };
 
+    // ── Touch events ──────────────────────────────────────────────────
+    let touchStartX = 0;
+    let touchStartY = 0;
+    let touchLastX = 0;
+    let touchLastY = 0;
+    let touchMoved = false;
+
+    const onTouchStart = (event: TouchEvent) => {
+      if (event.touches.length !== 1) return;
+      event.preventDefault();
+      const touch = event.touches[0];
+      touchStartX = touch.clientX;
+      touchStartY = touch.clientY;
+      touchLastX = touch.clientX;
+      touchLastY = touch.clientY;
+      touchMoved = false;
+      stateRef.current.dragging = true;
+      // Use larger hit radius for finger taps (12px extra)
+      stateRef.current.hoverIndex = hitTest(touch.clientX, touch.clientY, 12);
+    };
+
+    const onTouchMove = (event: TouchEvent) => {
+      if (event.touches.length !== 1) return;
+      event.preventDefault();
+      const touch = event.touches[0];
+      const dx = touch.clientX - touchLastX;
+      const dy = touch.clientY - touchLastY;
+      touchLastX = touch.clientX;
+      touchLastY = touch.clientY;
+
+      // If moved more than 8px total, this is a drag, not a tap
+      if (
+        Math.abs(touch.clientX - touchStartX) > 8 ||
+        Math.abs(touch.clientY - touchStartY) > 8
+      ) {
+        touchMoved = true;
+      }
+
+      stateRef.current.rotationY += dx * 0.006;
+      stateRef.current.rotationX = Math.max(
+        -0.72,
+        Math.min(0.72, stateRef.current.rotationX + dy * 0.004)
+      );
+      stateRef.current.hoverIndex = hitTest(touch.clientX, touch.clientY, 12);
+    };
+
+    const onTouchEnd = (event: TouchEvent) => {
+      event.preventDefault();
+      stateRef.current.dragging = false;
+      // If this was a tap (not a drag), select the node
+      if (!touchMoved) {
+        const hovered = stateRef.current.hoverIndex;
+        onSelect(hovered >= 0 ? stateRef.current.nodes[hovered] : null);
+      }
+      stateRef.current.hoverIndex = -1;
+    };
+
     canvas.addEventListener("mousemove", onMouseMove);
     canvas.addEventListener("mousedown", onMouseDown);
     canvas.addEventListener("mouseleave", onMouseLeave);
     window.addEventListener("mouseup", onMouseUp);
     canvas.addEventListener("click", onClick);
+    canvas.addEventListener("touchstart", onTouchStart, { passive: false });
+    canvas.addEventListener("touchmove", onTouchMove, { passive: false });
+    canvas.addEventListener("touchend", onTouchEnd, { passive: false });
 
     let frameId = 0;
     const animate = () => {
@@ -257,8 +351,21 @@ export function MemoryGraph({
         const a = state.nodes[link.a];
         const b = state.nodes[link.b];
         const depth = (a.depthScale + b.depthScale) * 0.5;
-        const alpha = Math.max(0.04, Math.min(0.18, link.weight * 0.18 * depth));
-        ctx.strokeStyle = `rgba(255,255,255,${alpha})`;
+        const alpha = Math.max(0.05, Math.min(0.32, link.weight * 0.24 * depth));
+        const lineWidth =
+          link.kind === "duplicate"
+            ? 1.8
+            : link.kind === "strong"
+              ? 1.3
+              : 0.85;
+        ctx.lineWidth = lineWidth * Math.max(0.8, depth * 0.9);
+        if (link.kind === "duplicate") {
+          ctx.strokeStyle = `rgba(251,191,36,${alpha})`;
+        } else if (link.kind === "strong") {
+          ctx.strokeStyle = `rgba(251,146,60,${alpha})`;
+        } else {
+          ctx.strokeStyle = `rgba(255,255,255,${alpha})`;
+        }
         ctx.beginPath();
         ctx.moveTo(a.screenX, a.screenY);
         ctx.lineTo(b.screenX, b.screenY);
@@ -274,11 +381,17 @@ export function MemoryGraph({
         if (pulse.t > 1) pulse.t = 0;
         const x = a.screenX + (b.screenX - a.screenX) * pulse.t;
         const y = a.screenY + (b.screenY - a.screenY) * pulse.t;
-        ctx.fillStyle = "rgba(251,146,60,0.9)";
-        ctx.shadowBlur = 14;
-        ctx.shadowColor = "rgba(251,146,60,0.75)";
+        const color =
+          link.kind === "duplicate"
+            ? "rgba(251,191,36,0.96)"
+            : link.kind === "strong"
+              ? "rgba(251,146,60,0.92)"
+              : "rgba(255,255,255,0.74)";
+        ctx.fillStyle = color;
+        ctx.shadowBlur = link.kind === "duplicate" ? 18 : 14;
+        ctx.shadowColor = color;
         ctx.beginPath();
-        ctx.arc(x, y, 1.5, 0, Math.PI * 2);
+        ctx.arc(x, y, pulse.radius, 0, Math.PI * 2);
         ctx.fill();
       }
 
@@ -331,6 +444,9 @@ export function MemoryGraph({
       canvas.removeEventListener("mouseleave", onMouseLeave);
       window.removeEventListener("mouseup", onMouseUp);
       canvas.removeEventListener("click", onClick);
+      canvas.removeEventListener("touchstart", onTouchStart);
+      canvas.removeEventListener("touchmove", onTouchMove);
+      canvas.removeEventListener("touchend", onTouchEnd);
       cancelAnimationFrame(frameId);
     };
   }, [graph, onSelect]);
@@ -338,7 +454,7 @@ export function MemoryGraph({
   return (
     <canvas
       ref={canvasRef}
-      className="h-full w-full cursor-grab active:cursor-grabbing"
+      className="h-full w-full touch-none cursor-grab active:cursor-grabbing"
     />
   );
 }

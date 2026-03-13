@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sanitizeConfigInput } from "../../../agent/core.mjs";
 
 const AGENT_URL = process.env.EMBER_AGENT_URL || "http://127.0.0.1:4317";
 
@@ -23,7 +24,7 @@ export async function GET() {
 
 export async function PUT(req: NextRequest) {
   try {
-    const payload = await req.json();
+    const payload = sanitizeConfigInput(await req.json());
     const response = await fetch(`${AGENT_URL}/config`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },

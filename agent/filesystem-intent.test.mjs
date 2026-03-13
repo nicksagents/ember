@@ -12,6 +12,13 @@ test("looksLikeEditRequest detects plain-language edit requests", () => {
     looksLikeEditRequest("change the contents of the page.tsx to be a dashboard"),
     true
   );
+  assert.equal(looksLikeEditRequest("recode that page to look like a bank dashboard"), true);
+  assert.equal(looksLikeEditRequest("redesign the home page"), true);
+  assert.equal(looksLikeEditRequest("rebuild the login component"), true);
+  assert.equal(looksLikeEditRequest("transform this into a dark theme"), true);
+  assert.equal(looksLikeEditRequest("revamp the dashboard layout"), true);
+  assert.equal(looksLikeEditRequest("overhaul the styling"), true);
+  assert.equal(looksLikeEditRequest("rework the navigation"), true);
   assert.equal(looksLikeEditRequest("what is on my desktop"), false);
 });
 

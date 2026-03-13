@@ -16,7 +16,8 @@ function analyzeToolIntent(userContent) {
   const tokens = tokenize(userContent);
   const hasUrl = /https?:\/\/[^\s]+/.test(text);
   const mentionsPath =
-    /(?:^|\s)(?:~\/|\.\/|\/[a-z0-9_.-]|[a-z]:[\\/])/i.test(String(userContent || ""));
+    /(?:^|\s)(?:~\/|\.\/|\/[a-z0-9_.-]|[a-z]:[\\/]|[\w.-]+\/[\w./-]+|\b[\w.-]+\.[a-z0-9]{1,8}\b)/i
+      .test(String(userContent || ""));
   const wantsShell =
     /\b(?:run|execute|shell|bash|terminal|command|cli|script)\b/.test(text);
   const wantsBuildOrTest = /\b(?:build|test|lint|npm|pnpm|yarn|npx)\b/.test(text);
@@ -32,6 +33,10 @@ function analyzeToolIntent(userContent) {
   const wantsReadFile =
     /\b(?:read|open|view|show|inspect|cat)\b/.test(text) &&
     (/\bfile\b/.test(text) || mentionsPath);
+  const wantsSearchFile =
+    (/\b(?:find|search|contains?|mention(?:s|ed)?|label|labels|identifier|identifiers|setting|settings|field|fields|expose(?:s|d)?|include(?:s|d)?|whether)\b/.test(text) ||
+      /\bdoes\b/.test(text)) &&
+    (/\bfile\b/.test(text) || mentionsPath);
   const wantsWriteFile =
     /\b(?:write|save|create|edit|update|modify|append|replace|change|fix|patch)\b/.test(text) &&
     (/\bfile\b/.test(text) || mentionsPath);
@@ -41,7 +46,7 @@ function analyzeToolIntent(userContent) {
   const wantsStat =
     /\b(?:exists?|stat|metadata|size|mtime|path)\b/.test(text) &&
     (mentionsPath || /\bfile\b|\bfolder\b|\bdirectory\b/.test(text));
-  const wantsMemory = /\bmemory|remember|recall\b/.test(text);
+  const wantsMemory = /\b(?:memory|remember|recall|forget)\b/.test(text);
   const wantsPlanning = /\b(?:plan|todo|task|steps|progress|checklist)\b/.test(text);
 
   return {
@@ -60,6 +65,7 @@ function analyzeToolIntent(userContent) {
     wantsVerify,
     wantsListDir,
     wantsReadFile,
+    wantsSearchFile,
     wantsWriteFile,
     wantsDelete,
     wantsMove,
@@ -99,6 +105,7 @@ function scoreToolForIntent(tool, intent, forced) {
   }
   if (name === "list_dir" && intent.wantsListDir) score += 8;
   if (name === "read_file" && intent.wantsReadFile) score += 9;
+  if (name === "search_file" && intent.wantsSearchFile) score += 10;
   if (name === "write_file" && intent.wantsWriteFile) score += 9;
   if (name === "remove_path" && intent.wantsDelete) score += 9;
   if (name === "move_path" && intent.wantsMove) score += 9;
@@ -143,13 +150,13 @@ function getFallbackToolNames(intent) {
   if (intent.wantsProcess && intent.wantsStop) return ["list_processes", "kill_process", "verify_server"];
   if (intent.wantsProcess) return ["list_processes", "start_dev_server", "verify_server"];
   if (intent.wantsWriteFile || intent.wantsDelete || intent.wantsMove || intent.wantsCopy) {
-    return ["read_file", "write_file", "list_dir", "stat_path", "run_command"];
+    return ["search_file", "read_file", "write_file", "list_dir", "stat_path", "run_command"];
   }
-  if (intent.wantsReadFile || intent.wantsListDir || intent.wantsStat || intent.mentionsPath) {
-    return ["read_file", "list_dir", "stat_path", "run_command"];
+  if (intent.wantsSearchFile || intent.wantsReadFile || intent.wantsListDir || intent.wantsStat || intent.mentionsPath) {
+    return ["search_file", "read_file", "list_dir", "stat_path", "run_command"];
   }
-  if (intent.wantsPlanning) return ["task_manager", "read_file", "list_dir"];
-  return ["read_file", "list_dir", "stat_path", "run_command"];
+  if (intent.wantsPlanning) return ["task_manager", "search_file", "read_file", "list_dir"];
+  return ["search_file", "read_file", "list_dir", "stat_path", "run_command"];
 }
 
 function clampNumber(value, min, max, fallback) {
@@ -860,6 +867,7 @@ export function registerFilesystemTools(registry, { policy } = {}) {
           stdio: "ignore",
           detached: true,
         });
+        child.on("error", () => {});
         child.unref();
         return {
           started: true,
@@ -982,6 +990,78 @@ export function registerFilesystemTools(registry, { policy } = {}) {
       const data = await readFile(filePath);
       const slice = length === null ? data.slice(start) : data.slice(start, start + length);
       return { path: filePath, content: slice.toString("utf8") };
+    },
+  });
+
+  registry.register({
+    name: "search_file",
+    description: "Search a text file for a string and return matching lines with line numbers and nearby context. Prefer this before read_file when checking whether a setting, label, or identifier exists.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "File path" },
+        query: { type: "string", description: "Text to search for" },
+        caseSensitive: { type: "boolean", description: "Use case-sensitive matching" },
+        contextLines: { type: "number", description: "How many surrounding lines to include (0-5)" },
+        maxMatches: { type: "number", description: "Maximum matches to return (1-20)" },
+      },
+      required: ["path", "query"],
+    },
+    keywords: ["search", "find", "contains", "match", "label", "setting", "identifier", "grep"],
+    handler: async (args) => {
+      const filePath = normalizePathInput(args.path, policy);
+      const query = String(args.query || "").trim();
+      if (!query) {
+        return { error: "query is required", path: filePath };
+      }
+      const caseSensitive = args.caseSensitive === true;
+      const contextLines = clampNumber(args.contextLines, 0, 5, 1);
+      const maxMatches = clampNumber(args.maxMatches, 1, 20, 8);
+      const text = await readFile(filePath, "utf8");
+      const lines = text.split(/\r?\n/);
+      const needle = caseSensitive ? query : query.toLowerCase();
+      const matches = [];
+      let totalMatches = 0;
+
+      for (let index = 0; index < lines.length; index += 1) {
+        const line = lines[index];
+        const haystack = caseSensitive ? line : line.toLowerCase();
+        if (!haystack.includes(needle)) continue;
+        totalMatches += 1;
+        if (matches.length >= maxMatches) continue;
+
+        const before = [];
+        const after = [];
+        for (let offset = contextLines; offset >= 1; offset -= 1) {
+          const contextIndex = index - offset;
+          if (contextIndex >= 0) {
+            before.push({ lineNumber: contextIndex + 1, line: lines[contextIndex] });
+          }
+        }
+        for (let offset = 1; offset <= contextLines; offset += 1) {
+          const contextIndex = index + offset;
+          if (contextIndex < lines.length) {
+            after.push({ lineNumber: contextIndex + 1, line: lines[contextIndex] });
+          }
+        }
+
+        matches.push({
+          lineNumber: index + 1,
+          line,
+          before,
+          after,
+        });
+      }
+
+      return {
+        path: filePath,
+        query,
+        caseSensitive,
+        totalLines: lines.length,
+        matchCount: totalMatches,
+        truncated: totalMatches > matches.length,
+        matches,
+      };
     },
   });
 
@@ -1192,6 +1272,7 @@ export function registerFilesystemTools(registry, { policy } = {}) {
             stdio: "ignore",
             detached: true,
           });
+          child.on("error", () => {});
           child.unref();
           return {
             command,

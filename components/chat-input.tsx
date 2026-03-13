@@ -1,21 +1,19 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from "react";
-import { Box, Plus, SendHorizontal } from "lucide-react";
+import { Plus, SendHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 interface ChatInputProps {
   onSend: (message: string) => void;
   disabled?: boolean;
-  modelLabel?: string | null;
   onDraftStateChange?: (hasDraft: boolean) => void;
 }
 
 export function ChatInput({
   onSend,
   disabled = false,
-  modelLabel,
   onDraftStateChange,
 }: ChatInputProps) {
   const [input, setInput] = useState("");
@@ -73,13 +71,7 @@ export function ChatInput({
               <Plus className="h-3.5 w-3.5" />
             </div>
           </div>
-          <div className="flex items-center gap-3">
-            {modelLabel ? (
-              <div className="inline-flex max-w-[min(56vw,22rem)] items-center gap-2 rounded-xl bg-white/[0.06] px-3 py-1.5 text-[11px] text-zinc-200 sm:text-[12px]">
-                <Box className="h-3 w-3 shrink-0" />
-                <span className="truncate">{modelLabel}</span>
-              </div>
-            ) : null}
+          <div className="flex items-center">
             <Button
               onClick={handleSend}
               disabled={disabled || !input.trim()}

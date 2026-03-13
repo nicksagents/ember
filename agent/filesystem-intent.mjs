@@ -5,7 +5,7 @@ const FILE_REFERENCE_REGEX =
 
 export function looksLikeEditRequest(userContent) {
   const text = String(userContent || "").toLowerCase();
-  return /\b(?:edit|change|modify|update|replace|rewrite)\b/.test(text);
+  return /\b(?:edit|change|modify|update|replace|rewrite|recode|redo|redesign|rebuild|remake|transform|convert|revamp|restyle|overhaul|refactor|rework)\b/.test(text);
 }
 
 export function looksLikeReferentialFilesystemFollowUp(userContent) {

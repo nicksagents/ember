@@ -22,15 +22,14 @@ export async function POST(req: NextRequest) {
       clearTimeout(timer);
     }
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      return NextResponse.json(
-        { error: `Agent runtime error: ${response.status}`, details: errorText },
-        { status: 502 }
-      );
+    const text = await response.text();
+    let data;
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch {
+      data = { error: `Agent runtime error: ${response.status}`, details: text };
     }
-
-    return NextResponse.json(await response.json());
+    return NextResponse.json(data, { status: response.status });
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
       return NextResponse.json(

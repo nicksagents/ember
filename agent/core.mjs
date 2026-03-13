@@ -1,7 +1,7 @@
 const DEFAULT_MAX_MEMORY_ITEMS = 10;
-const DEFAULT_MAX_MEMORY_CHARS = 800;
+const DEFAULT_MAX_MEMORY_CHARS = 2000;
 const DEFAULT_CONTEXT_LIMIT = 40;
-const DEFAULT_MAX_TOOL_ROUNDS = 28;
+const DEFAULT_MAX_TOOL_ROUNDS = 48;
 const DEFAULT_MEMORY_LIMIT = 5;
 const DEFAULT_MAX_PINNED = 2;
 const DEFAULT_MEMORY_MAX_AGE_DAYS = 180;
@@ -12,10 +12,10 @@ const DEFAULT_MAX_MEMORY_BUCKET = 50;
 const DEFAULT_RECENT_MEMORY_BUCKET = 50;
 const DEFAULT_DECAY_HALF_LIFE_DAYS = 120;
 const DEFAULT_USAGE_BOOST_MAX = 1.5;
-const DEFAULT_MAX_TOOL_RESULT_CHARS = 12000;
+const DEFAULT_MAX_TOOL_RESULT_CHARS = 16000;
 const DEFAULT_MAX_LIST_DIR_ENTRIES = 200;
-const DEFAULT_MAX_TOOL_STREAM_CHARS = 6000;
-const TOOL_LOOP_MESSAGE_LIMIT = 32;
+const DEFAULT_MAX_TOOL_STREAM_CHARS = 12000;
+const TOOL_LOOP_MESSAGE_LIMIT = 96;
 const STOPWORDS = new Set([
   "the",
   "and",
@@ -73,6 +73,34 @@ const STOPWORDS = new Set([
   "making",
   "made",
 ]);
+const SHORT_KEEPERS = new Set([
+  "ip",
+  "os",
+  "db",
+  "ui",
+  "ci",
+  "cd",
+  "js",
+  "ts",
+  "ai",
+  "ml",
+  "go",
+  "vm",
+  "id",
+  "py",
+  "rs",
+  "c",
+  "r",
+  "ws",
+  "io",
+  "ux",
+  "qa",
+  "pr",
+  "md",
+  "api",
+  "css",
+  "sql",
+]);
 
 const isNonEmptyString = (value) =>
   typeof value === "string" && value.trim().length > 0;
@@ -101,6 +129,141 @@ export function validateChatRequest(body) {
     : { ok: true, data: { conversationId, content, config: body.config } };
 }
 
+function sanitizeProviderConfigs(providers) {
+  if (!Array.isArray(providers)) return undefined;
+  const normalizeSecret = (value) =>
+    typeof value === "string" ? value.replace(/\s+/g, "") : value;
+  const clean = [];
+  for (const provider of providers) {
+    if (!provider || typeof provider !== "object") continue;
+    const next = {};
+    if (typeof provider.id === "string") next.id = provider.id.trim();
+    if (!next.id) continue;
+    if (typeof provider.name === "string") next.name = provider.name;
+    if (typeof provider.type === "string") next.type = provider.type;
+    if (typeof provider.endpoint === "string") next.endpoint = provider.endpoint.trim();
+    if (typeof provider.apiKey === "string") {
+      next.apiKey = normalizeSecret(provider.apiKey);
+    }
+    if (typeof provider.apiKeyEnvVar === "string") {
+      next.apiKeyEnvVar = provider.apiKeyEnvVar.trim();
+    }
+    if (typeof provider.authType === "string") next.authType = provider.authType;
+    if (Array.isArray(provider.models)) {
+      next.models = provider.models.map((model) => String(model).trim()).filter(Boolean);
+    }
+    if (typeof provider.defaultModel === "string") {
+      next.defaultModel = provider.defaultModel.trim();
+    }
+    if (typeof provider.maxContextWindow === "number") {
+      next.maxContextWindow = clampNumber(
+        provider.maxContextWindow,
+        1024,
+        1_000_000,
+        8192
+      );
+    }
+    if (typeof provider.supportsTools === "boolean") {
+      next.supportsTools = provider.supportsTools;
+    }
+    if (typeof provider.supportsStreaming === "boolean") {
+      next.supportsStreaming = provider.supportsStreaming;
+    }
+    if (typeof provider.supportsBrowser === "boolean") {
+      next.supportsBrowser = provider.supportsBrowser;
+    }
+    if (typeof provider.enabled === "boolean") next.enabled = provider.enabled;
+    if (typeof provider.modelsEndpoint === "string") {
+      next.modelsEndpoint = provider.modelsEndpoint.trim();
+    }
+    if (typeof provider.oauthRefreshToken === "string") {
+      next.oauthRefreshToken = normalizeSecret(provider.oauthRefreshToken);
+    }
+    if (
+      typeof provider.oauthExpiresAt === "number" ||
+      provider.oauthExpiresAt === null
+    ) {
+      next.oauthExpiresAt = provider.oauthExpiresAt;
+    }
+    if (typeof provider.oauthAccountId === "string") {
+      next.oauthAccountId = provider.oauthAccountId.trim();
+    }
+    if (typeof provider.oauthIdToken === "string") {
+      next.oauthIdToken = normalizeSecret(provider.oauthIdToken);
+    }
+    if (provider.samplingDefaults && typeof provider.samplingDefaults === "object") {
+      next.samplingDefaults = {};
+      if (typeof provider.samplingDefaults.temperature === "number") {
+        next.samplingDefaults.temperature = clampNumber(
+          provider.samplingDefaults.temperature,
+          0,
+          2,
+          0.7
+        );
+      }
+      if (typeof provider.samplingDefaults.top_p === "number") {
+        next.samplingDefaults.top_p = clampNumber(
+          provider.samplingDefaults.top_p,
+          0,
+          1,
+          0.9
+        );
+      }
+      if (typeof provider.samplingDefaults.max_tokens === "number") {
+        next.samplingDefaults.max_tokens =
+          provider.samplingDefaults.max_tokens <= 0
+            ? 0
+            : clampNumber(provider.samplingDefaults.max_tokens, 64, 65536, 4096);
+      }
+    }
+    clean.push(next);
+  }
+  return clean;
+}
+
+function sanitizeRoleAssignments(assignments) {
+  if (!assignments || typeof assignments !== "object") return undefined;
+  const next = {};
+  for (const key of [
+    "default",
+    "planner",
+    "coder",
+    "auditor",
+    "maintenance",
+    "router",
+  ]) {
+    const value = assignments[key];
+    if (!value || typeof value !== "object") continue;
+    const providerId =
+      typeof value.providerId === "string" ? value.providerId.trim() : "";
+    const model = typeof value.model === "string" ? value.model.trim() : "";
+    if (!providerId && !model) continue;
+    next[key] = { providerId, model };
+  }
+  return next;
+}
+
+function sanitizePayloadCompatDisabledParams(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const next = {};
+  for (const [rawKey, rawParams] of Object.entries(value)) {
+    const key = typeof rawKey === "string" ? rawKey.trim().toLowerCase() : "";
+    if (!key || !key.includes("::")) continue;
+    const params = Array.isArray(rawParams)
+      ? Array.from(
+          new Set(
+            rawParams
+              .map((param) => String(param || "").trim().toLowerCase())
+              .filter(Boolean)
+          )
+        )
+      : [];
+    if (params.length === 0) continue;
+    next[key] = params;
+  }
+  return next;
+}
+
 export function sanitizeConfigInput(input) {
   if (!input || typeof input !== "object") return {};
   const safe = {};
@@ -116,8 +279,14 @@ export function sanitizeConfigInput(input) {
   if (typeof input.webSearchEnabled === "boolean") {
     safe.webSearchEnabled = input.webSearchEnabled;
   }
+  if (typeof input.toolMode === "string") {
+    safe.toolMode = input.toolMode;
+  }
   if (typeof input.temperature === "number") {
     safe.temperature = clampNumber(input.temperature, 0, 2, 0.7);
+  }
+  if (typeof input.toolTemperature === "number") {
+    safe.toolTemperature = clampNumber(input.toolTemperature, 0, 2, 0.4);
   }
   if (typeof input.top_p === "number") {
     safe.top_p = clampNumber(input.top_p, 0, 1, 0.8);
@@ -125,17 +294,43 @@ export function sanitizeConfigInput(input) {
   if (typeof input.top_k === "number") {
     safe.top_k = clampNumber(input.top_k, 0, 100, 20);
   }
+  if (typeof input.toolTopK === "number") {
+    safe.toolTopK = clampNumber(input.toolTopK, 1, 100, 10);
+  }
   if (typeof input.min_p === "number") {
     safe.min_p = clampNumber(input.min_p, 0, 1, 0);
   }
   if (typeof input.repetition_penalty === "number") {
     safe.repetition_penalty = clampNumber(input.repetition_penalty, 0.5, 2.0, 1.05);
   }
+  if (typeof input.toolRepetitionPenalty === "number") {
+    safe.toolRepetitionPenalty = clampNumber(
+      input.toolRepetitionPenalty,
+      0.5,
+      2.0,
+      1.15
+    );
+  }
   if (typeof input.max_tokens === "number") {
-    safe.max_tokens = clampNumber(input.max_tokens, 64, 8192, 2048);
+    safe.max_tokens =
+      input.max_tokens <= 0
+        ? 0
+        : clampNumber(input.max_tokens, 64, 65536, 4096);
+  }
+  if (typeof input.contextWindow === "number") {
+    safe.contextWindow = clampNumber(input.contextWindow, 8192, 131072, 28660);
+  }
+  if (typeof input.maxMemoryItems === "number") {
+    safe.maxMemoryItems = clampNumber(input.maxMemoryItems, 1, 30, 10);
+  }
+  if (typeof input.maxMemoryChars === "number") {
+    safe.maxMemoryChars = clampNumber(input.maxMemoryChars, 200, 8000, 2000);
+  }
+  if (typeof input.contextCharBudget === "number") {
+    safe.contextCharBudget = clampNumber(input.contextCharBudget, 4000, 96000, 28000);
   }
   if (typeof input.maxToolRounds === "number") {
-    safe.maxToolRounds = clampNumber(input.maxToolRounds, 1, 80, 28);
+    safe.maxToolRounds = clampNumber(input.maxToolRounds, 1, 240, 48);
   }
   if (typeof input.lightweightMode === "boolean") {
     safe.lightweightMode = input.lightweightMode;
@@ -155,9 +350,23 @@ export function sanitizeConfigInput(input) {
   if (typeof input.desktopDir === "string") {
     safe.desktopDir = input.desktopDir;
   }
+  const providers = sanitizeProviderConfigs(input.providers);
+  if (providers) {
+    safe.providers = providers;
+  }
+  const roleAssignments = sanitizeRoleAssignments(input.roleAssignments);
+  if (roleAssignments) {
+    safe.roleAssignments = roleAssignments;
+  }
+  const payloadCompatDisabledParams = sanitizePayloadCompatDisabledParams(
+    input.payloadCompatDisabledParams
+  );
+  if (payloadCompatDisabledParams) {
+    safe.payloadCompatDisabledParams = payloadCompatDisabledParams;
+  }
   if (input.modelRoles && typeof input.modelRoles === "object") {
     const roles = {};
-    for (const key of ["assistant", "planner", "coder", "critic"]) {
+    for (const key of ["assistant", "planner", "coder", "critic", "classifier"]) {
       if (typeof input.modelRoles[key] === "string") {
         roles[key] = input.modelRoles[key];
       }
@@ -189,6 +398,7 @@ export function buildSystemPrompt({
       "1. Understand the task: identify the goal, constraints, target paths/services, and success criteria.",
       "2. Execute the task: use the minimum necessary tools and keep moving until the task is actually changed.",
       "3. Verify the result: use tools to confirm the requested end state before the final answer.",
+      "4. Preserve durable context: when the user reveals stable preferences, identity, workflow rules, or long-lived project facts, call save_memory during the tool loop.",
       "Never claim success from intention, a PID, or an unverified command alone.",
     ].join("\n")
   );
@@ -202,7 +412,7 @@ export function buildSystemPrompt({
       const content = typeof mem.content === "string" ? mem.content.trim() : "";
       if (!content) continue;
       if (totalChars + content.length > maxMemoryChars) break;
-      items.push(`- ${content}`);
+      items.push(`- [${mem.type || "general"}] ${content}`);
       totalChars += content.length;
     }
     if (items.length > 0) {
@@ -222,10 +432,83 @@ function tokenize(text) {
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, " ")
     .split(/\s+/)
-    .filter((token) => token.length > 2 && !STOPWORDS.has(token));
+    .filter(
+      (token) => (token.length > 2 || SHORT_KEEPERS.has(token)) && !STOPWORDS.has(token)
+    );
 }
 
-export function parseLooseToolCalls(content) {
+function looksLikeShellCommandLine(line) {
+  const text = String(line || "").trim();
+  if (!text) return false;
+  if (/[;&|<>`$()]/.test(text)) return true;
+  if (/^(?:\.\/|\/|~\/)/.test(text)) return true;
+  if (/\s/.test(text)) return true;
+  return /^(?:cd|ls|cat|pwd|echo|touch|mkdir|rm|mv|cp|find|grep|sed|awk|chmod|chown|curl|wget|git|npm|pnpm|yarn|npx|node|python|pytest|uv|make|docker|kubectl|go|cargo|java|javac|bash|sh)\b/.test(
+    text
+  );
+}
+
+function looksLikeFilePath(value) {
+  const text = String(value || "").trim();
+  if (!text) return false;
+  return /^(?:\.{1,2}\/|~\/|\/)?(?:[\w.-]+\/)*[\w.-]+\.[a-z0-9]+$/i.test(text);
+}
+
+function extractCommentFilePath(line) {
+  const text = String(line || "").trim();
+  if (!text) return "";
+  const match = text.match(
+    /^(?:(?:\/\/|#)\s*|\/\*+\s*|<!--\s*)(?:file|path)?\s*:?\s*([^\s*<>]+?\.[a-z0-9]+)\s*(?:\*\/|-->)?\s*$/i
+  );
+  if (!match) return "";
+  return looksLikeFilePath(match[1]) ? match[1] : "";
+}
+
+function extractLabeledFilePath(line) {
+  const text = String(line || "").trim();
+  if (!text) return "";
+  const labeledMatch = text.match(
+    /^(?:file|path)\s*:?\s*([^\s]+?\.[a-z0-9]+)\s*$/i
+  );
+  if (labeledMatch && looksLikeFilePath(labeledMatch[1])) {
+    return labeledMatch[1];
+  }
+  return looksLikeFilePath(text) ? text : "";
+}
+
+function extractWriteFileCallFromFence(block, prefixText = "") {
+  const raw = String(block || "").replace(/\r\n/g, "\n");
+  if (!raw.trim()) return null;
+
+  const lines = raw.split("\n");
+  const firstMeaningfulIndex = lines.findIndex((line) => line.trim());
+  if (firstMeaningfulIndex >= 0) {
+    const commentPath = extractCommentFilePath(lines[firstMeaningfulIndex]);
+    if (commentPath) {
+      const contentLines = lines.slice();
+      contentLines.splice(firstMeaningfulIndex, 1);
+      return {
+        path: commentPath,
+        content: contentLines.join("\n").trim(),
+      };
+    }
+  }
+
+  const prefixLines = String(prefixText || "").split("\n").slice(-3).reverse();
+  for (const line of prefixLines) {
+    const labeledPath = extractLabeledFilePath(line);
+    if (labeledPath) {
+      return {
+        path: labeledPath,
+        content: raw.trim(),
+      };
+    }
+  }
+
+  return null;
+}
+
+export function parseLooseToolCalls(content, { editTargetPath } = {}) {
   if (typeof content !== "string") return [];
   const calls = [];
   let index = 0;
@@ -279,9 +562,52 @@ export function parseLooseToolCalls(content) {
       if (raw === "true") value = true;
       else if (raw === "false") value = false;
       else if (raw && !Number.isNaN(Number(raw))) value = Number(raw);
+      else if (raw && (raw.startsWith("{") || raw.startsWith("["))) {
+        try {
+          value = JSON.parse(raw);
+        } catch {
+          value = raw;
+        }
+      }
       args[key] = value;
     }
     pushToolCall(name, args);
+  }
+
+  // Recovery: detect truncated XML tool calls (model hit max_tokens mid-output)
+  // Look for <function=write_file> with <parameter=content> but no closing </function>
+  if (calls.length === 0) {
+    const truncatedFnMatch = content.match(
+      /<function\s*=\s*(write_file)\s*>([\s\S]+)$/i
+    );
+    if (truncatedFnMatch) {
+      const name = truncatedFnMatch[1].trim();
+      const body = truncatedFnMatch[2] || "";
+      const args = {};
+      // Extract any fully closed parameters
+      const paramRegex = /<parameter\s*=\s*([^\s>]+)\s*>([\s\S]*?)<\/parameter>/gi;
+      let param;
+      while ((param = paramRegex.exec(body))) {
+        const key = param[1].trim();
+        args[key] = (param[2] || "").trim();
+      }
+      // Extract the truncated content parameter (no closing tag)
+      if (!args.content) {
+        const truncContentMatch = body.match(
+          /<parameter\s*=\s*content\s*>([\s\S]+)$/i
+        );
+        if (truncContentMatch) {
+          args.content = truncContentMatch[1].trimEnd();
+        }
+      }
+      if (args.path && args.content) {
+        pushToolCall(name, {
+          path: args.path,
+          content: args.content,
+          createDirs: /[\\/]/.test(args.path),
+        });
+      }
+    }
   }
 
   const bracketRegex = /^\s*\[([a-z_][a-z0-9_]*)\]\s*(.+?)\s*(?:\n|$)/gim;
@@ -304,7 +630,7 @@ export function parseLooseToolCalls(content) {
         args = { query: rawArgs };
       } else if (name === "fetch_url") {
         args = { url: rawArgs };
-      } else if (name === "list_dir" || name === "read_file" || name === "stat_path") {
+      } else if (name === "list_dir" || name === "read_file" || name === "search_file" || name === "stat_path") {
         args = { path: rawArgs };
       } else if (name === "run_command") {
         args = { command: rawArgs };
@@ -322,12 +648,51 @@ export function parseLooseToolCalls(content) {
     while ((bashMatch = bashBlockRegex.exec(content))) {
       const block = (bashMatch[1] || "").trim();
       if (!block) continue;
-      const firstLine = block.split("\n")[0].trim();
+      const lines = block
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith("#"));
+      if (lines.length === 0) continue;
+      const firstLine = lines[0];
       // Skip if it looks like fabricated output (ls output, permissions, etc.)
       if (/^(?:total\s+\d|d?[r-][w-][x-]|lrwx|crw-|\d+\s)/.test(firstLine)) continue;
       if (firstLine.length < 2) continue;
-      pushToolCall("run_command", { command: firstLine });
+      const commandLines = [firstLine];
+      for (const line of lines.slice(1)) {
+        if (!looksLikeShellCommandLine(line)) break;
+        commandLines.push(line);
+      }
+      pushToolCall("run_command", { command: commandLines.join(" && ") });
       break; // Only convert the first bash block
+    }
+  }
+
+  // Fallback: detect file-targeted code fences → write_file
+  if (calls.length === 0) {
+    const codeBlockRegex = /```([a-z0-9_+-]*)\s*\n([\s\S]*?)```/gi;
+    let codeMatch;
+    while ((codeMatch = codeBlockRegex.exec(content))) {
+      const language = String(codeMatch[1] || "").trim().toLowerCase();
+      if (language === "bash" || language === "shell" || language === "sh") continue;
+      const block = codeMatch[2] || "";
+      const prefix = content.slice(Math.max(0, codeMatch.index - 200), codeMatch.index);
+      const writeCall = extractWriteFileCallFromFence(block, prefix);
+      if (writeCall?.path) {
+        pushToolCall("write_file", {
+          path: writeCall.path,
+          content: writeCall.content,
+          createDirs: /[\\/]/.test(writeCall.path),
+        });
+      } else if (editTargetPath && block.trim()) {
+        // When we know the target file from intent, any non-bash code fence
+        // is almost certainly the file content the model meant to write.
+        pushToolCall("write_file", {
+          path: editTargetPath,
+          content: block.trimEnd(),
+          createDirs: /[\\/]/.test(editTargetPath),
+        });
+        break; // Only convert the first matching code block
+      }
     }
   }
 
@@ -335,6 +700,16 @@ export function parseLooseToolCalls(content) {
   if (calls.length === 0) {
     const KNOWN_FS_TOOLS = ["list_dir", "read_file", "stat_path"];
     const lower = content.toLowerCase();
+    if (lower.includes("search_file")) {
+      const pathMatch = content.match(/(?:\/[\w./-]+|~\/[\w./-]+|\.\/[\w./-]+)/);
+      const queryMatch = content.match(/["'`](.{2,120}?)["'`]/);
+      if (pathMatch && queryMatch) {
+        pushToolCall("search_file", {
+          path: pathMatch[0],
+          query: queryMatch[1].trim(),
+        });
+      }
+    }
     for (const toolName of KNOWN_FS_TOOLS) {
       if (!lower.includes(toolName)) continue;
       const pathMatch = content.match(/(?:\/[\w./-]+|~\/[\w./-]+|\.\/[\w./-]+)/);
@@ -374,6 +749,12 @@ function formatToolFallback(name, result) {
   if (name === "read_file" && typeof result.content === "string") {
     return result.content;
   }
+  if (name === "search_file" && Array.isArray(result.matches)) {
+    if (result.matches.length === 0) return "No matches found.";
+    return result.matches
+      .map((match) => `Line ${match.lineNumber}: ${match.line}`)
+      .join("\n");
+  }
   if (name === "stat_path") {
     return JSON.stringify(result, null, 2);
   }
@@ -388,17 +769,20 @@ function formatToolFallback(name, result) {
 export function looksLikeActionPreface(content) {
   const text = String(content || "").trim().toLowerCase();
   if (!text) return false;
+  const ACTION_VERBS = "check|look|inspect|explore|review|read|open|search|scan|go through|use|call|run|create|write|update|modify|edit|make|build|save|generate|add|delete|remove|install|fix|change";
+  const actionPattern = new RegExp(`\\b(?:${ACTION_VERBS})\\b`);
   if ([
-    /\blet me\b.*\b(?:check|look|inspect|explore|review|read|open|search|scan|go through|use|call|run)\b/,
-    /\bi(?:'ll| will)\b.*\b(?:check|look|inspect|explore|review|read|open|search|scan|go through|use|call|run)\b/,
+    new RegExp(`\\blet me\\b.*${actionPattern.source}`),
+    new RegExp(`\\bi(?:'ll| will)\\b.*${actionPattern.source}`),
     /\bfirst[, ]+\bi(?:'ll| will)\b/,
-    /\bi(?:'m| am)\s+going\s+to\b.*\b(?:check|look|inspect|explore|review|read|open|search|scan|use|call|run)\b/,
+    new RegExp(`\\bi(?:'m| am)\\s+going\\s+to\\b.*${actionPattern.source}`),
     /\btake a look\b/,
-    /\bchecking\b.*\b(?:file|files|folder|directory|project|repo|repository|codebase|structure)\b/,
+    /\b(?:checking|creating|writing|updating|building|making|editing|modifying)\b.*\b(?:file|files|folder|directory|project|repo|repository|codebase|structure|page|component|dashboard)\b/,
+    /\bnow\s+i(?:'ll| will)\b/,
   ].some((pattern) => pattern.test(text))) return true;
   // Detect mentions of actual tool names in narrative text
   const TOOL_NAMES = [
-    "list_dir", "read_file", "write_file", "stat_path", "run_command",
+    "list_dir", "read_file", "search_file", "write_file", "stat_path", "run_command",
     "remove_path", "move_path", "copy_path", "web_search", "fetch_url",
     "list_processes", "kill_process", "start_dev_server", "verify_server",
   ];
@@ -446,41 +830,91 @@ function cosineSimilarity(a, b) {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-function scoreMemory(mem, tokens, fullQuery, queryEmbedding) {
-  if (!mem || typeof mem.content !== "string") return 0;
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildTokenRegex(token) {
+  return new RegExp(`\\b${escapeRegExp(token)}\\b`);
+}
+
+function scoreMemoryWithBreakdown(mem, tokens, fullQuery, queryEmbedding) {
+  if (!mem || typeof mem.content !== "string") {
+    return {
+      score: 0,
+      breakdown: {
+        fullQueryBoost: 0,
+        tokenScore: 0,
+        tokenMatches: [],
+        tagScore: 0,
+        tagMatches: [],
+        typeBoost: 0,
+        recencyBoost: 0,
+        embeddingBoost: 0,
+        usageBoost: 0,
+        decayMultiplier: 1,
+        confirmationMultiplier: 1,
+      },
+    };
+  }
   const content = mem.content.toLowerCase();
+  const breakdown = {
+    fullQueryBoost: 0,
+    tokenScore: 0,
+    tokenMatches: [],
+    tagScore: 0,
+    tagMatches: [],
+    typeBoost: 0,
+    recencyBoost: 0,
+    embeddingBoost: 0,
+    usageBoost: 0,
+    decayMultiplier: 1,
+    confirmationMultiplier: 1,
+  };
   let score = 0;
 
   if (fullQuery && content.includes(fullQuery)) {
     if (fullQuery.length / Math.max(content.length, 1) >= 0.6) {
       score += 3;
+      breakdown.fullQueryBoost = 3;
     }
   }
-  for (const token of tokens) {
-    if (content.includes(token)) score += 1;
+  const tokenRegexes = tokens.map((token) => [token, buildTokenRegex(token)]);
+  for (const [token, tokenRegex] of tokenRegexes) {
+    if (tokenRegex.test(content)) {
+      score += 1;
+      breakdown.tokenScore += 1;
+      breakdown.tokenMatches.push(token);
+    }
   }
 
   if (Array.isArray(mem.tags)) {
     const tagString = mem.tags.join(" ").toLowerCase();
-    for (const token of tokens) {
-      if (tagString.includes(token)) score += 0.5;
+    for (const [token, tokenRegex] of tokenRegexes) {
+      if (tokenRegex.test(tagString)) {
+        score += 0.5;
+        breakdown.tagScore += 0.5;
+        breakdown.tagMatches.push(token);
+      }
     }
   }
 
   if (mem.type) {
     const type = String(mem.type).toLowerCase();
-    if (type === "identity") score += 1;
-    if (type === "preference") score += 0.7;
-    if (type === "workflow") score += 0.5;
-    if (type === "project") score += 0.5;
-    if (type === "reference") score += 0.3;
+    if (type === "identity") breakdown.typeBoost += 0.5;
+    if (type === "preference") breakdown.typeBoost += 0.7;
+    if (type === "workflow") breakdown.typeBoost += 0.5;
+    if (type === "project") breakdown.typeBoost += 0.5;
+    if (type === "reference") breakdown.typeBoost += 0.3;
+    score += breakdown.typeBoost;
   }
 
   if (mem.ts) {
     const ageMs = Date.now() - Date.parse(mem.ts);
     if (Number.isFinite(ageMs) && ageMs >= 0) {
       const days = ageMs / 86_400_000;
-      score += Math.max(0, 2 - Math.min(days / 30, 2));
+      breakdown.recencyBoost = Math.max(0, 2 - Math.min(days / 30, 2));
+      score += breakdown.recencyBoost;
     }
   }
 
@@ -490,15 +924,18 @@ function scoreMemory(mem, tokens, fullQuery, queryEmbedding) {
         ? mem.embedding
         : buildEmbedding(mem.content);
     const sim = cosineSimilarity(queryEmbedding, memEmbedding);
-    if (sim > 0) score += sim * 2;
+    if (sim > 0) {
+      breakdown.embeddingBoost = sim * 2;
+      score += breakdown.embeddingBoost;
+    }
   }
 
   if (typeof mem.useCount === "number") {
-    const boost = Math.min(
+    breakdown.usageBoost = Math.min(
       DEFAULT_USAGE_BOOST_MAX,
       Math.log1p(mem.useCount) / 2
     );
-    score += boost;
+    score += breakdown.usageBoost;
   }
 
   if (mem.lastUsed) {
@@ -506,15 +943,31 @@ function scoreMemory(mem, tokens, fullQuery, queryEmbedding) {
     if (Number.isFinite(ageMs) && ageMs >= 0) {
       const days = ageMs / 86_400_000;
       const decay = Math.exp(-Math.log(2) * days / DEFAULT_DECAY_HALF_LIFE_DAYS);
-      score *= Math.max(0.5, decay);
+      breakdown.decayMultiplier = Math.max(0.3, decay);
+      score *= breakdown.decayMultiplier;
     }
   }
 
   if (mem.confirmed === false) {
+    breakdown.confirmationMultiplier = 0.8;
     score *= 0.8;
   }
 
-  return score;
+  return {
+    score,
+    breakdown,
+  };
+}
+
+function scoreMemory(mem, tokens, fullQuery, queryEmbedding) {
+  return scoreMemoryWithBreakdown(mem, tokens, fullQuery, queryEmbedding).score;
+}
+
+export function explainMemoryScore(mem, query) {
+  const fullQuery = isNonEmptyString(query) ? query.toLowerCase().trim() : "";
+  const tokens = tokenize(fullQuery);
+  const queryEmbedding = fullQuery ? buildEmbedding(fullQuery) : null;
+  return scoreMemoryWithBreakdown(mem, tokens, fullQuery, queryEmbedding);
 }
 
 export function selectRelevantMemories(
@@ -585,7 +1038,7 @@ export function selectRelevantMemories(
     }))
     .filter((entry) => {
       if (isInvalidated(entry.mem)) return false;
-      if (!isApproved(entry.mem)) return false;
+      if (!isApproved(entry.mem) && entry.score < minScore + 1.2) return false;
       if (entry.score < minScore) return false;
       if (!isConfirmed(entry.mem) && entry.score < minScore + 0.5) return false;
       return true;
@@ -598,6 +1051,31 @@ export function selectRelevantMemories(
 
   const remaining = Math.max(0, limit - pinned.length);
   return pinned.concat(scored.slice(0, remaining)).slice(0, limit);
+}
+
+export function inferRelevantMemoryLimit(
+  memories,
+  query,
+  baseLimit = DEFAULT_MEMORY_LIMIT,
+  maxLimit = 10,
+  options = {}
+) {
+  if (!Array.isArray(memories) || memories.length === 0) return baseLimit;
+  const fullQuery = isNonEmptyString(query) ? query.toLowerCase().trim() : "";
+  const tokens = tokenize(fullQuery);
+  if (!fullQuery && tokens.length === 0) return baseLimit;
+  const queryEmbedding = fullQuery ? buildEmbedding(fullQuery) : null;
+  const minScore =
+    typeof options.minScore === "number" ? options.minScore : DEFAULT_MIN_SCORE;
+  const strongMatches = memories
+    .map((mem) => scoreMemory(mem, tokens, fullQuery, queryEmbedding))
+    .filter((score) => score >= minScore + 1.5).length;
+
+  if (strongMatches >= 8) return Math.min(maxLimit, Math.max(baseLimit, 9));
+  if (strongMatches >= 6) return Math.min(maxLimit, Math.max(baseLimit, 8));
+  if (strongMatches >= 4) return Math.min(maxLimit, Math.max(baseLimit, 7));
+  if (strongMatches >= 3) return Math.min(maxLimit, Math.max(baseLimit, 6));
+  return baseLimit;
 }
 
 function memorySimilarity(a, b) {
@@ -768,6 +1246,26 @@ function normalizeMemoryText(text) {
   return text.trim().replace(/\s+/g, " ");
 }
 
+function splitIntoSentences(text) {
+  return String(text || "")
+    .replace(/\s+/g, " ")
+    .split(/(?<=[.!?])\s+/)
+    .map((part) => normalizeMemoryText(part))
+    .filter(Boolean);
+}
+
+function stripLeadingByline(text) {
+  return String(text || "").replace(/^[A-Z][A-Za-z .'-]{1,60}\s+[—-]\s+/, "");
+}
+
+function safeHostnameFromUrl(url) {
+  try {
+    return new URL(String(url || "")).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
 function addCandidate(candidates, content, tags, reason) {
   const normalized = normalizeMemoryText(content);
   if (!normalized) return;
@@ -818,10 +1316,11 @@ export function detectMemoryCandidates(
       );
     }
   }
-  const nameMatchAlt = text.match(/\b(?:i am|i'm)\s+([A-Za-z][^,.\n]+)\b/i);
+  const nameMatchAlt = text.match(/\b(?:i am|i'm|im)\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)\b/);
   if (nameMatchAlt) {
     const value = nameMatchAlt[1].trim();
-    if (value.length > 1 && !/\d/.test(value)) {
+    // Only match proper names (capitalized), not roles like "a developer" or "in Toronto"
+    if (value.length > 1 && !/\d/.test(value) && !/^(?:a|an|the|in|on|at|from|based|located|working|using|running)\b/i.test(value)) {
       addCandidate(
         candidates,
         `User's name is ${value}.`,
@@ -832,7 +1331,7 @@ export function detectMemoryCandidates(
   }
 
   // Age
-  const ageMatch = text.match(/\b(?:i am|i'm)\s+(\d{1,3})\b/i);
+  const ageMatch = text.match(/\b(?:i am|i'm|im)\s+(\d{1,3})\b/i);
   if (ageMatch) {
     const age = Number.parseInt(ageMatch[1], 10);
     if (Number.isFinite(age) && age > 3 && age < 120) {
@@ -966,6 +1465,98 @@ export function detectMemoryCandidates(
     }
   }
 
+  // Occupation / role
+  const occupationMatch = text.match(
+    /\b(?:i'?m a|i am a|i work as a|i work as an|my role is|my job is|i do)\s+([^,.\n]+)\b/i
+  );
+  if (occupationMatch) {
+    const value = occupationMatch[1].trim();
+    if (value.length > 1 && !/^(?:a|an|the)\s*$/i.test(value)) {
+      addCandidate(
+        candidates,
+        `User is a ${value}.`,
+        ["identity", "occupation"],
+        "user occupation"
+      );
+    }
+  }
+
+  // Employer / company
+  const employerMatch = text.match(
+    /\b(?:i work at|i work for|my company is|i'm at|i am at|employed at|employed by)\s+([^,.\n]+)\b/i
+  );
+  if (employerMatch) {
+    const value = employerMatch[1].trim();
+    if (value.length > 1) {
+      addCandidate(
+        candidates,
+        `User works at ${value}.`,
+        ["identity", "employer"],
+        "user employer"
+      );
+    }
+  }
+
+  // Location
+  const locationMatch = text.match(
+    /\b(?:i'?m in|i am in|i live in|i'm from|i am from|i'm based in|i am based in|located in)\s+([^,.\n]+)\b/i
+  );
+  if (locationMatch) {
+    const value = locationMatch[1].trim();
+    if (value.length > 1) {
+      addCandidate(
+        candidates,
+        `User is located in ${value}.`,
+        ["identity", "location"],
+        "user location"
+      );
+    }
+  }
+
+  // Tech stack
+  const techStackMatch = text.match(
+    /\b(?:i use|we use|our (?:project|app|stack) uses|(?:project|app|stack) is (?:built (?:with|on|in)|using|in))\s+([^,.\n]+)\b/i
+  );
+  if (techStackMatch) {
+    const value = techStackMatch[1].trim();
+    if (value.length > 1) {
+      addCandidate(
+        candidates,
+        `User uses ${value}.`,
+        ["project", "tech-stack"],
+        "tech stack"
+      );
+    }
+  }
+
+  // OS / system
+  const osMatch = text.match(
+    /\b(?:i'?m on|i am on|i run|i use|running)\s+(Ubuntu|Debian|Fedora|Arch|macOS|Windows|Linux|CentOS|Alpine|Pop!?_?OS|Manjaro|openSUSE|FreeBSD)\b/i
+  );
+  if (osMatch) {
+    const value = osMatch[1].trim();
+    addCandidate(
+      candidates,
+      `User is on ${value}.`,
+      ["reference", "system"],
+      "user OS"
+    );
+  }
+
+  // Editor / IDE
+  const editorMatch = text.match(
+    /\b(?:i use|my editor is|my ide is|i code (?:in|with))\s+(VS\s*Code|Neovim|Vim|Emacs|Sublime|Atom|IntelliJ|WebStorm|PyCharm|Cursor|Zed|Helix|Nano|Notepad\+?\+?)\b/i
+  );
+  if (editorMatch) {
+    const value = editorMatch[1].trim();
+    addCandidate(
+      candidates,
+      `User's editor is ${value}.`,
+      ["preference", "editor"],
+      "user editor"
+    );
+  }
+
   const filtered = candidates.filter(
     (entry) => !alreadyKnown(entry.content, existingMemories)
   );
@@ -1029,6 +1620,184 @@ export function detectAssistantFacts(assistantText, existingMemories, limit = 2)
       `git version is ${gitMatch[1]}.`,
       ["reference", "system"]
     );
+  }
+
+  // Docker version
+  const dockerMatch = text.match(/\bDocker\s+(?:version\s+)?v?(\d+(?:\.\d+)+)/i);
+  if (dockerMatch) {
+    addAssistantCandidate(
+      `Docker version is ${dockerMatch[1]}.`,
+      ["reference", "system"]
+    );
+  }
+
+  // Database mentions
+  const dbMatch = text.match(
+    /\b(?:using|running|connected to|detected)\s+(PostgreSQL|MySQL|MariaDB|MongoDB|SQLite|Redis|Cassandra|DynamoDB|CockroachDB|Supabase)\s*(?:v?(\d+(?:\.\d+)*))?/i
+  );
+  if (dbMatch) {
+    const dbName = dbMatch[1];
+    const dbVersion = dbMatch[2] ? ` ${dbMatch[2]}` : "";
+    addAssistantCandidate(
+      `Project uses ${dbName}${dbVersion}.`,
+      ["reference", "project"]
+    );
+  }
+
+  // Framework versions
+  const frameworkMatch = text.match(
+    /\b(React|Next\.js|Vue|Angular|Svelte|Express|Fastify|Django|Flask|Rails|Spring|Laravel|Nuxt|Remix|Astro)\s+v?(\d+(?:\.\d+)+)/i
+  );
+  if (frameworkMatch) {
+    addAssistantCandidate(
+      `${frameworkMatch[1]} version is ${frameworkMatch[2]}.`,
+      ["reference", "project"]
+    );
+  }
+
+  return candidates.slice(0, limit);
+}
+
+export function detectDiscoveryFacts(toolName, toolResult, existingMemories, limit = 2) {
+  if (!toolName || !toolResult) return [];
+  // Never extract from memory tools (avoid recursive saves)
+  if (toolName === "save_memory" || toolName === "search_memory") return [];
+  const candidates = [];
+  const addDiscovery = (content, tags) => {
+    if (alreadyKnown(content, existingMemories)) return;
+    addCandidate(candidates, content, tags, "discovered from tool result");
+  };
+
+  const resultStr = typeof toolResult === "string"
+    ? toolResult
+    : typeof toolResult?.output === "string"
+      ? toolResult.output
+      : typeof toolResult?.content === "string"
+        ? toolResult.content
+        : JSON.stringify(toolResult);
+
+  if (toolName === "read_file") {
+    const filePath = typeof toolResult?.path === "string" ? toolResult.path : "";
+    // package.json detection
+    if (filePath.endsWith("package.json") || /^\s*\{[\s\S]*"name"\s*:/.test(resultStr)) {
+      try {
+        const pkg = typeof toolResult === "string" ? JSON.parse(toolResult) : (toolResult?.parsed || JSON.parse(resultStr));
+        if (pkg?.name) {
+          addDiscovery(`Project name is ${pkg.name}.`, ["project"]);
+        }
+        const allDeps = { ...(pkg?.dependencies || {}), ...(pkg?.devDependencies || {}) };
+        const frameworks = [
+          ["react", "React"], ["next", "Next.js"], ["vue", "Vue"],
+          ["@angular/core", "Angular"], ["svelte", "Svelte"],
+          ["express", "Express"], ["fastify", "Fastify"],
+          ["nuxt", "Nuxt"], ["remix", "Remix"], ["astro", "Astro"],
+          ["@remix-run/react", "Remix"], ["gatsby", "Gatsby"],
+        ];
+        for (const [dep, label] of frameworks) {
+          if (allDeps[dep]) {
+            addDiscovery(`Project uses ${label}.`, ["project", "framework"]);
+            break;
+          }
+        }
+      } catch { /* not valid JSON */ }
+    }
+    // Config file detection (never save actual values)
+    if (/\.env/.test(filePath)) {
+      if (/DATABASE_URL|DB_HOST|POSTGRES|MYSQL|MONGO/i.test(resultStr)) {
+        addDiscovery("Project uses a database (detected from .env).", ["project", "infrastructure"]);
+      }
+    }
+  }
+
+  if (toolName === "run_command") {
+    // git user.name / user.email
+    const gitNameMatch = resultStr.match(/^([^\n]+)$/m);
+    const cmdStr = typeof toolResult?.command === "string" ? toolResult.command : "";
+    if (/git\s+config.*user\.name/.test(cmdStr) && gitNameMatch) {
+      addDiscovery(`Git user.name is ${gitNameMatch[1].trim()}.`, ["identity", "git"]);
+    }
+    if (/git\s+config.*user\.email/.test(cmdStr) && gitNameMatch) {
+      addDiscovery(`Git user.email is ${gitNameMatch[1].trim()}.`, ["identity", "git"]);
+    }
+    // Node version
+    const nodeVerMatch = resultStr.match(/v(\d+\.\d+\.\d+)/);
+    if (/node\s+--?version|node\s+-v/.test(cmdStr) && nodeVerMatch) {
+      addDiscovery(`Node.js version is ${nodeVerMatch[1]}.`, ["reference", "system"]);
+    }
+    // Python version
+    const pyVerMatch = resultStr.match(/Python\s+(\d+\.\d+\.\d+)/i);
+    if (pyVerMatch) {
+      addDiscovery(`Python version is ${pyVerMatch[1]}.`, ["reference", "system"]);
+    }
+    // OS detection from uname
+    if (/uname/.test(cmdStr)) {
+      const unameMatch = resultStr.match(/(Linux|Darwin|FreeBSD|Windows)/i);
+      if (unameMatch) {
+        addDiscovery(`System OS kernel is ${unameMatch[1]}.`, ["reference", "system"]);
+      }
+    }
+  }
+
+  if (toolName === "list_dir") {
+    const entries = typeof resultStr === "string" ? resultStr : "";
+    // Project type detection from characteristic files
+    if (/\bnext\.config\b/i.test(entries)) {
+      addDiscovery("Project is a Next.js application.", ["project", "framework"]);
+    } else if (/\bCargo\.toml\b/.test(entries)) {
+      addDiscovery("Project is a Rust project.", ["project", "language"]);
+    } else if (/\bgo\.mod\b/.test(entries)) {
+      addDiscovery("Project is a Go project.", ["project", "language"]);
+    } else if (/\brequirements\.txt\b/.test(entries)) {
+      addDiscovery("Project is a Python project.", ["project", "language"]);
+    } else if (/\bcomposer\.json\b/.test(entries)) {
+      addDiscovery("Project is a PHP project.", ["project", "language"]);
+    } else if (/\bGemfile\b/.test(entries)) {
+      addDiscovery("Project is a Ruby project.", ["project", "language"]);
+    }
+    // Git repo detection
+    if (/\b\.git\b/.test(entries)) {
+      addDiscovery("Directory is a git repository.", ["project", "git"]);
+    }
+  }
+
+  if (toolName === "web_search") {
+    const query = normalizeMemoryText(toolResult?.query || toolResult?.effectiveQuery || "");
+    const results = Array.isArray(toolResult?.results) ? toolResult.results : [];
+    for (const result of results.slice(0, 4)) {
+      const title = normalizeMemoryText(result?.title || "");
+      const snippet = normalizeMemoryText(result?.snippet || "");
+      const host = safeHostnameFromUrl(result?.url || "");
+      if (!title && !snippet) continue;
+      const pieces = [];
+      pieces.push(query ? `Web result for "${query}"` : "Web result");
+      if (title) pieces.push(title);
+      if (snippet) pieces.push(snippet);
+      if (host) pieces.push(`Source: ${host}.`);
+      addDiscovery(
+        pieces.join(": ").replace(": Source:", ". Source:"),
+        ["reference", "web"]
+      );
+    }
+  }
+
+  if (toolName === "fetch_url") {
+    const title = normalizeMemoryText(toolResult?.title || "");
+    const host = safeHostnameFromUrl(toolResult?.canonicalUrl || toolResult?.url || "");
+    const excerpt =
+      normalizeMemoryText(toolResult?.excerpt || "") ||
+      splitIntoSentences(stripLeadingByline(toolResult?.text || ""))
+        .slice(0, 2)
+        .join(" ");
+    if (title || excerpt) {
+      const pieces = [];
+      pieces.push(title ? `From "${title}"` : "Fetched page");
+      if (excerpt) pieces.push(excerpt);
+      if (host) pieces.push(`Source: ${host}.`);
+      addDiscovery(
+        pieces.join(": ").replace(": Source:", ". Source:"),
+        ["reference", "web"]
+      );
+    }
   }
 
   return candidates.slice(0, limit);
@@ -1195,6 +1964,12 @@ function formatToolResultContent(toolName, result) {
 }
 
 function trimToolLoopPayload(messages, maxToolRoundMessages = TOOL_LOOP_MESSAGE_LIMIT) {
+  const pinnedMessages = messages.filter(
+    (msg) =>
+      typeof msg?.content === "string" &&
+      (msg.content.startsWith("[Execution plan]") ||
+        msg.content.startsWith("[Task plan]"))
+  );
   let toolStartIndex = -1;
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const msg = messages[i];
@@ -1219,8 +1994,18 @@ function trimToolLoopPayload(messages, maxToolRoundMessages = TOOL_LOOP_MESSAGE_
     role: "user",
     content: `[System note] ${droppedCount} earlier tool messages trimmed. Continue with the current task.`,
   };
+  const merged = [...prefix, summaryNote, ...trimmed];
+  const existingPins = new Set(
+    merged.map((msg) =>
+      typeof msg?.content === "string" ? `${msg.role}:${msg.content}` : ""
+    )
+  );
+  const restoredPins = pinnedMessages.filter((msg) => {
+    const key = typeof msg?.content === "string" ? `${msg.role}:${msg.content}` : "";
+    return key && !existingPins.has(key);
+  });
 
-  return [...prefix, summaryNote, ...trimmed];
+  return [...prefix, ...restoredPins, summaryNote, ...trimmed];
 }
 
 export async function runToolLoop({
@@ -1238,6 +2023,7 @@ export async function runToolLoop({
   buildVerifyPrompt = null,
   toolCallGuard = null,
   onAssistantMessage = null,
+  editTargetPath = "",
 }) {
   let llmResponse = await callLLM(payload);
   let assistantContent = "";
@@ -1326,6 +2112,7 @@ export async function runToolLoop({
               toolResults,
               defaultPrompt: verifyContent,
               phase: "fallback",
+              payload,
             });
             if (typeof customVerifyContent === "string" && customVerifyContent.trim()) {
               verifyContent = customVerifyContent;
@@ -1343,7 +2130,7 @@ export async function runToolLoop({
     }
 
     if ((!message?.tool_calls || message.tool_calls.length === 0) && message?.content) {
-      const parsed = parseLooseToolCalls(message.content);
+      const parsed = parseLooseToolCalls(message.content, { editTargetPath });
       if (parsed.length > 0) {
         message.tool_calls = parsed;
         message.content = null;
@@ -1683,6 +2470,7 @@ export async function runToolLoop({
           toolResults,
           defaultPrompt: verifyContent,
           phase: "normal",
+          payload,
         });
         if (typeof customVerifyContent === "string" && customVerifyContent.trim()) {
           verifyContent = customVerifyContent;

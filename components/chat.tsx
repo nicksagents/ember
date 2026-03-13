@@ -1,11 +1,13 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import {
   Activity,
   ArrowDown,
   CheckCircle2,
   LoaderCircle,
+  MessageSquareText,
+  Sparkles,
   Wrench,
   XCircle,
 } from "lucide-react";
@@ -35,6 +37,7 @@ interface ChatProgressStep {
   kind?: string;
   toolName?: string;
   phase?: string;
+  role?: string;
 }
 
 interface ChatProgressState {
@@ -44,6 +47,113 @@ interface ChatProgressState {
 }
 
 const BOTTOM_THRESHOLD_PX = 40;
+const PENDING_CHAT_STORAGE_KEY = "ember:pending-chat:v1";
+
+interface PendingChatRequest {
+  conversationId: string;
+  content: string;
+  startedAt: string;
+  attempts: number;
+  lastAttemptAt: string;
+}
+
+function parseTimestamp(value: string | null | undefined) {
+  if (!value) return Number.NaN;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+
+function messagesLikelyMatch(a: MessageData, b: MessageData) {
+  if (a.role !== b.role) return false;
+  if (a.content !== b.content) return false;
+  const aTs = parseTimestamp(a.createdAt);
+  const bTs = parseTimestamp(b.createdAt);
+  if (Number.isNaN(aTs) || Number.isNaN(bTs)) return true;
+  return Math.abs(aTs - bTs) <= 30_000;
+}
+
+function mergeMessages(
+  previous: MessageData[],
+  hydrated: MessageData[],
+  pending: PendingChatRequest | null
+) {
+  if (!previous.length) return hydrated;
+  const merged = [...hydrated];
+  for (const existing of previous) {
+    const alreadyPresent = merged.some((serverMessage) =>
+      messagesLikelyMatch(serverMessage, existing)
+    );
+    if (alreadyPresent) continue;
+    const isPendingUserMessage =
+      existing.role === "user" &&
+      pending &&
+      existing.content === pending.content &&
+      parseTimestamp(existing.createdAt) >= parseTimestamp(pending.startedAt) - 1000;
+    if (isPendingUserMessage) {
+      merged.push(existing);
+    }
+  }
+  return merged;
+}
+
+function readPendingChatStore(): Record<string, PendingChatRequest> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(PENDING_CHAT_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writePendingChatStore(store: Record<string, PendingChatRequest>) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(PENDING_CHAT_STORAGE_KEY, JSON.stringify(store));
+  } catch {}
+}
+
+function getPendingChat(conversationId: string | null): PendingChatRequest | null {
+  if (!conversationId) return null;
+  const store = readPendingChatStore();
+  const entry = store[conversationId];
+  if (!entry || entry.conversationId !== conversationId) return null;
+  return entry;
+}
+
+function savePendingChat(entry: PendingChatRequest) {
+  const store = readPendingChatStore();
+  store[entry.conversationId] = entry;
+  writePendingChatStore(store);
+}
+
+function clearPendingChat(conversationId: string | null) {
+  if (!conversationId) return;
+  const store = readPendingChatStore();
+  if (!(conversationId in store)) return;
+  delete store[conversationId];
+  writePendingChatStore(store);
+}
+
+async function queuePendingChat(entry: PendingChatRequest) {
+  const nextEntry = {
+    ...entry,
+    attempts: (entry.attempts || 0) + 1,
+    lastAttemptAt: new Date().toISOString(),
+  };
+  savePendingChat(nextEntry);
+  const res = await fetch("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      conversationId: nextEntry.conversationId,
+      content: nextEntry.content,
+    }),
+  });
+  return { res, entry: nextEntry };
+}
 
 export function Chat({
   conversationId,
@@ -54,11 +164,78 @@ export function Chat({
 }: ChatProps) {
   const [messages, setMessages] = useState<MessageData[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [activeModelLabel, setActiveModelLabel] = useState<string>("");
   const [progress, setProgress] = useState<ChatProgressState | null>(null);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
+  const [pendingRequest, setPendingRequest] = useState<PendingChatRequest | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const shouldStickToBottomRef = useRef(true);
+
+  const loadMessages = useCallback(
+    async (
+      targetConversationId: string,
+      options?: {
+        pending?: PendingChatRequest | null;
+        preserveOptimistic?: boolean;
+      }
+    ) => {
+      try {
+        const res = await fetch(
+          `/api/conversations/${targetConversationId}?limit=200`,
+          { cache: "no-store" }
+        );
+        const data = await res.json();
+        if (!res.ok || !Array.isArray(data?.messages)) return false;
+        const hydrated: MessageData[] = data.messages
+          .filter(
+            (entry: { role?: string; content?: string }) =>
+              (entry.role === "user" || entry.role === "assistant") &&
+              typeof entry.content === "string"
+          )
+          .map(
+            (entry: {
+              role: "user" | "assistant";
+              content: string;
+              ts?: string;
+              meta?: MessageMeta | null;
+            }) => ({
+              id: uid(),
+              role: entry.role,
+              content: entry.content,
+              createdAt: entry.ts || null,
+              meta: entry.meta || null,
+            })
+          );
+        setMessages((prev) =>
+          options?.preserveOptimistic ? mergeMessages(prev, hydrated, options.pending ?? null) : hydrated
+        );
+        shouldStickToBottomRef.current = true;
+        setShowJumpToBottom(false);
+
+        const pending = options?.pending ?? getPendingChat(targetConversationId);
+        if (pending) {
+          const completed = hydrated.some(
+            (entry) =>
+              entry.role === "assistant" &&
+              Boolean(entry.createdAt) &&
+              Date.parse(entry.createdAt || "") >= Date.parse(pending.startedAt)
+          );
+          if (completed) {
+            clearPendingChat(targetConversationId);
+            setPendingRequest((current) =>
+              current?.conversationId === targetConversationId ? null : current
+            );
+            setIsLoading(false);
+            setProgress(null);
+            return true;
+          }
+        }
+        return false;
+      } catch {
+        return false;
+      }
+    },
+    []
+  );
 
   const isNearBottom = useCallback((element: HTMLDivElement | null) => {
     if (!element) return true;
@@ -103,72 +280,26 @@ export function Chat({
   }, [onThinkingChange, onTypingChange]);
 
   useEffect(() => {
-    let cancelled = false;
-    const loadConfig = async () => {
-      try {
-        const res = await fetch("/api/config");
-        const data = await res.json();
-        if (!res.ok || cancelled) return;
-        const model = data?.modelRoles?.assistant || data?.model || "";
-        if (model) setActiveModelLabel(model);
-      } catch {}
-    };
-    void loadConfig();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
     if (!conversationId) {
       setMessages([]);
       setProgress(null);
+      setPendingRequest(null);
+      setIsLoading(false);
       shouldStickToBottomRef.current = true;
       setShowJumpToBottom(false);
       return;
     }
-    const loadMessages = async () => {
-      try {
-        const res = await fetch(`/api/conversations/${conversationId}?limit=200`);
-        const data = await res.json();
-        if (!res.ok || !Array.isArray(data?.messages)) return;
-        const hydrated: MessageData[] = data.messages
-          .filter(
-            (entry: { role?: string; content?: string }) =>
-              (entry.role === "user" || entry.role === "assistant") &&
-              typeof entry.content === "string"
-          )
-          .map(
-            (entry: {
-              role: "user" | "assistant";
-              content: string;
-              ts?: string;
-              meta?: MessageMeta | null;
-            }) => ({
-              id: uid(),
-              role: entry.role,
-              content: entry.content,
-              createdAt: entry.ts || null,
-              meta: entry.meta || null,
-            })
-          );
-        setMessages(hydrated);
-        const latestModel = [...hydrated]
-          .reverse()
-          .find((entry) => entry.role === "assistant" && entry.meta?.model)
-          ?.meta?.model;
-        if (latestModel) setActiveModelLabel(latestModel);
-        shouldStickToBottomRef.current = true;
-        setShowJumpToBottom(false);
-      } catch {
-        setMessages([]);
-      }
-    };
-    void loadMessages();
-  }, [conversationId]);
+    const restoredPending = getPendingChat(conversationId);
+    setPendingRequest(restoredPending);
+    setIsLoading(Boolean(restoredPending));
+    void loadMessages(conversationId, {
+      pending: restoredPending,
+      preserveOptimistic: Boolean(restoredPending),
+    });
+  }, [conversationId, loadMessages]);
 
   useEffect(() => {
-    if (!isLoading || !conversationId) {
+    if (!conversationId || !pendingRequest || pendingRequest.conversationId !== conversationId) {
       setProgress(null);
       return;
     }
@@ -189,11 +320,73 @@ export function Chat({
           status: data.status || "running",
           steps: Array.isArray(data.steps) ? data.steps : [],
         });
+        if (data.status === "completed") {
+          await loadMessages(conversationId, {
+            pending: pendingRequest,
+            preserveOptimistic: false,
+          });
+          clearPendingChat(conversationId);
+          setPendingRequest(null);
+          setIsLoading(false);
+          setProgress(null);
+          onConversationUpdate?.();
+          cancelled = true;
+          return;
+        }
+        if (data.status === "failed") {
+          await loadMessages(conversationId, {
+            pending: pendingRequest,
+            preserveOptimistic: false,
+          });
+          const lastFailureStep = Array.isArray(data.steps)
+            ? [...data.steps]
+                .reverse()
+                .find((step) => typeof step?.text === "string" && step.text.trim())
+            : null;
+          setMessages((prev) => {
+            const hasFailureReply = prev.some(
+              (entry) =>
+                entry.role === "assistant" &&
+                Boolean(entry.createdAt) &&
+                Date.parse(entry.createdAt || "") >=
+                  Date.parse(pendingRequest.startedAt || "") - 1000
+            );
+            if (hasFailureReply) return prev;
+            return [
+              ...prev,
+              {
+                id: uid(),
+                role: "assistant",
+                content: lastFailureStep?.text || "Request failed.",
+                createdAt: new Date().toISOString(),
+              },
+            ];
+          });
+          clearPendingChat(conversationId);
+          setPendingRequest(null);
+          setIsLoading(false);
+          onConversationUpdate?.();
+          cancelled = true;
+          return;
+        }
+        if (data.status === "idle") {
+          const ageMs =
+            Date.now() - Date.parse(pendingRequest.lastAttemptAt || pendingRequest.startedAt);
+          if (ageMs > 2000) {
+            try {
+              const retried = await queuePendingChat(pendingRequest);
+              setPendingRequest(retried.entry);
+              if (retried.res.status === 409) {
+                return;
+              }
+            } catch {}
+          }
+        }
       } catch {
         if (cancelled) return;
       } finally {
         if (!cancelled) {
-          timer = setTimeout(poll, 800);
+          timer = setTimeout(poll, 1200);
         }
       }
     };
@@ -204,7 +397,7 @@ export function Chat({
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [conversationId, isLoading]);
+  }, [conversationId, loadMessages, onConversationUpdate, pendingRequest]);
 
   const handleSend = useCallback(
     async (content: string) => {
@@ -233,6 +426,15 @@ export function Chat({
       setMessages((prev) => [...prev, userMessage]);
       shouldStickToBottomRef.current = true;
       setShowJumpToBottom(false);
+      const nextPending = {
+        conversationId: activeId,
+        content,
+        startedAt: new Date().toISOString(),
+        attempts: 0,
+        lastAttemptAt: new Date().toISOString(),
+      };
+      savePendingChat(nextPending);
+      setPendingRequest(nextPending);
       setIsLoading(true);
       setProgress({
         conversationId: activeId,
@@ -241,11 +443,8 @@ export function Chat({
       });
 
       try {
-        const res = await fetch("/api/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ conversationId: activeId, content }),
-        });
+        const { res, entry: submittedPending } = await queuePendingChat(nextPending);
+        setPendingRequest(submittedPending);
 
         if (!res.ok) {
           const errData = await res.json().catch(() => null);
@@ -255,20 +454,38 @@ export function Chat({
         }
 
         const data = await res.json();
-        const assistantMessage: MessageData = {
-          id: uid(),
-          role: "assistant",
-          content: data.content || "No response received.",
-          createdAt: new Date().toISOString(),
-          meta: data.meta || null,
-        };
-
-        setMessages((prev) => [...prev, assistantMessage]);
-        if (data?.meta?.model) {
-          setActiveModelLabel(data.meta.model);
+        if (res.status === 202) {
+          return;
         }
+        clearPendingChat(activeId);
+        setPendingRequest(null);
+        await loadMessages(activeId, { preserveOptimistic: false });
         onConversationUpdate?.();
       } catch (error) {
+        const resumed = await loadMessages(activeId, { pending: nextPending });
+        if (resumed) {
+          clearPendingChat(activeId);
+          setPendingRequest(null);
+          onConversationUpdate?.();
+          return;
+        }
+        try {
+          const statusRes = await fetch(
+            `/api/chat/status?conversationId=${encodeURIComponent(activeId)}`,
+            { cache: "no-store" }
+          );
+          const statusData = await statusRes.json().catch(() => null);
+          if (statusRes.ok && ["running", "completed"].includes(statusData?.status)) {
+            setProgress({
+              conversationId: statusData.conversationId || activeId,
+              status: statusData.status || "running",
+              steps: Array.isArray(statusData?.steps) ? statusData.steps : [],
+            });
+            return;
+          }
+        } catch {}
+        clearPendingChat(activeId);
+        setPendingRequest(null);
         const errorMessage: MessageData = {
           id: uid(),
           role: "assistant",
@@ -276,10 +493,12 @@ export function Chat({
         };
         setMessages((prev) => [...prev, errorMessage]);
       } finally {
-        setIsLoading(false);
+        if (!getPendingChat(activeId)) {
+          setIsLoading(false);
+        }
       }
     },
-    [conversationId, onConversationUpdate, onEnsureConversation]
+    [conversationId, loadMessages, onConversationUpdate, onEnsureConversation]
   );
 
   const handleScroll = useCallback(() => {
@@ -291,6 +510,8 @@ export function Chat({
     scrollToBottom("smooth");
     setShowJumpToBottom(false);
   }, [scrollToBottom]);
+
+  const renderedMessages = useMemo(() => messages, [messages]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -310,7 +531,7 @@ export function Chat({
           </div>
         ) : (
           <div className="mx-auto flex w-full max-w-[50rem] flex-col gap-5 pb-2 pt-4 sm:pt-6">
-            {messages.map((msg) => (
+            {renderedMessages.map((msg) => (
               <Message key={msg.id} message={msg} />
             ))}
             {isLoading ? <ChatProgressPanel progress={progress} /> : null}
@@ -335,7 +556,6 @@ export function Chat({
             <ChatInput
               onSend={handleSend}
               disabled={isLoading || (!conversationId && !onEnsureConversation)}
-              modelLabel={activeModelLabel}
               onDraftStateChange={onTypingChange}
             />
             <p className="mt-2 text-center text-xs text-zinc-600">
@@ -383,11 +603,21 @@ function ChatProgressPanel({
                     ) : (
                       <Wrench className="h-3.5 w-3.5 text-orange-300" />
                     )
+                  ) : step.kind === "assistant" ? (
+                    <MessageSquareText className="h-3.5 w-3.5 text-cyan-300" />
+                  ) : step.kind === "workflow" ? (
+                    <Sparkles className="h-3.5 w-3.5 text-violet-300" />
                   ) : (
                     <Activity className="h-3.5 w-3.5" />
                   )}
                 </div>
                 <div className="min-w-0">
+                  {step.role ? (
+                    <div className="mb-1 inline-flex items-center gap-1.5 rounded-full bg-white/[0.05] px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-zinc-400">
+                      <Sparkles className="h-3 w-3" />
+                      {step.role}
+                    </div>
+                  ) : null}
                   {step.toolName ? (
                     <div className="mb-1 inline-flex items-center gap-1.5 rounded-full bg-white/[0.05] px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-zinc-400">
                       <Wrench className="h-3 w-3" />

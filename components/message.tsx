@@ -1,5 +1,6 @@
 "use client";
 
+import { memo } from "react";
 import { Box, Braces, Gauge, Timer, Waypoints, Wrench } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -9,6 +10,9 @@ export interface ToolTraceEntry {
 }
 
 export interface MessageMeta {
+  role?: string | null;
+  providerId?: string | null;
+  providerName?: string | null;
   model?: string | null;
   providerModel?: string | null;
   contextTokens?: number | null;
@@ -37,7 +41,7 @@ interface MessageProps {
   message: MessageData;
 }
 
-export function Message({ message }: MessageProps) {
+export const Message = memo(function Message({ message }: MessageProps) {
   const isUser = message.role === "user";
   const meta = !isUser ? message.meta : null;
   const renderedTokenCount = meta?.completionTokens ?? meta?.totalTokens ?? null;
@@ -65,6 +69,18 @@ export function Message({ message }: MessageProps) {
         </div>
         {meta ? (
           <div className="mt-3 flex flex-wrap items-center gap-x-3.5 gap-y-1.5 text-[11px] text-zinc-500">
+            {meta.role ? (
+              <span className="inline-flex items-center gap-2 rounded-full bg-white/[0.05] px-2.5 py-1 text-zinc-300">
+                <SparklesDot />
+                {meta.role}
+              </span>
+            ) : null}
+            {meta.providerName ? (
+              <span className="inline-flex items-center gap-2 rounded-full bg-white/[0.05] px-2.5 py-1 text-zinc-300">
+                <ServerDot />
+                {meta.providerName}
+              </span>
+            ) : null}
             {meta.model ? (
               <span className="inline-flex items-center gap-2 rounded-full bg-white/[0.05] px-2.5 py-1 text-zinc-300">
                 <Box className="h-3 w-3" />
@@ -113,6 +129,14 @@ export function Message({ message }: MessageProps) {
       </div>
     </div>
   );
+});
+
+function SparklesDot() {
+  return <span className="inline-block h-2 w-2 rounded-full bg-amber-300" />;
+}
+
+function ServerDot() {
+  return <span className="inline-block h-2 w-2 rounded-full bg-cyan-300" />;
 }
 
 function formatCompactNumber(value: number) {
